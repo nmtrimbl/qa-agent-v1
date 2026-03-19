@@ -98,6 +98,7 @@ def generate_report(*, run_id: str, url: str, execution_result: ExecutionResult,
         overall_status=overall_status,  # type: ignore[arg-type]
         failure_summary=failure_summary,
         steps_executed=execution_result.steps_executed,
+        failed_step=execution_result.failed_step,
         console_errors=execution_result.console_errors,
         screenshot_paths=execution_result.screenshot_paths,
         page_url_at_failure=execution_result.failure.page_url_at_failure if execution_result.failure else None,

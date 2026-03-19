@@ -4,13 +4,14 @@ import re
 import traceback
 import unicodedata
 from pathlib import Path
+import time
 from typing import Optional
 
 from playwright.sync_api import Page
 from pydantic import BaseModel
 
 from browser.browser_session import BrowserSession
-from models.test_report import ConsoleError, StepExecution
+from models.test_report import ConsoleError, FailedStepDetails, StepExecution
 from models.test_step import StepAction, TestStep
 from utils.file_helpers import ensure_dir, safe_filename, write_json
 
@@ -27,6 +28,7 @@ class ExecutionResult(BaseModel):
     success: bool
     steps_executed: list[StepExecution]
     failure: Optional[FailureInfo] = None
+    failed_step: Optional[FailedStepDetails] = None
 
     console_errors: list[ConsoleError] = []
     screenshot_paths: list[str] = []
@@ -35,6 +37,10 @@ class ExecutionResult(BaseModel):
 class BrowserExecutor:
     """
     Executes planned `TestStep`s deterministically using Playwright.
+
+    Important design rule:
+    - This executor is deterministic and non-LLM-driven.
+    - It only reads validated `TestStep` objects and performs them in order.
     """
 
     def __init__(self, artifacts_dir: str | Path):
@@ -59,24 +65,36 @@ class BrowserExecutor:
         screenshot_paths: list[str] = []
 
         failure_info: Optional[FailureInfo] = None
+        failed_step_details: Optional[FailedStepDetails] = None
 
         for step_index, step in enumerate(steps):
             try:
-                self._execute_single_step(
+                step_screenshot_path = self._execute_single_step(
                     page=page,
                     step=step,
                     screenshots_dir=screenshots_dir,
                     screenshot_paths=screenshot_paths,
                 )
-                steps_executed.append(StepExecution(step=step, status="ok"))
+                steps_executed.append(
+                    StepExecution(
+                        step_index=step_index,
+                        step=step,
+                        status="ok",
+                        page_url=page.url,
+                        screenshot_path=step_screenshot_path,
+                    )
+                )
             except Exception as e:
                 tb = traceback.format_exc()
                 exc_type = type(e).__name__
-                # Take a failure screenshot immediately.
+                # If a step fails, capture the page exactly as it failed so the
+                # user can inspect the visible browser state.
                 failure_shot_path = screenshots_dir / f"failure_step_{step_index}_{safe_filename(step.action.value)}.png"
+                failure_screenshot_str: Optional[str] = None
                 try:
                     self._capture_full_page_screenshot(page, failure_shot_path)
-                    screenshot_paths.append(str(failure_shot_path))
+                    failure_screenshot_str = str(failure_shot_path)
+                    screenshot_paths.append(failure_screenshot_str)
                 except Exception:
                     # If screenshot fails, still proceed with error reporting.
                     pass
@@ -86,9 +104,25 @@ class BrowserExecutor:
                     exception_type=exc_type,
                     stack_trace=tb,
                     page_url_at_failure=page.url,
-                    failure_screenshot_paths=[str(failure_shot_path)] if failure_shot_path.exists() else [],
+                    failure_screenshot_paths=[failure_screenshot_str] if failure_screenshot_str else [],
                 )
-                steps_executed.append(StepExecution(step=step, status="failed", error_message=str(e)))
+                steps_executed.append(
+                    StepExecution(
+                        step_index=step_index,
+                        step=step,
+                        status="failed",
+                        page_url=page.url,
+                        screenshot_path=failure_screenshot_str,
+                        error_message=str(e),
+                    )
+                )
+                failed_step_details = FailedStepDetails(
+                    step_index=step_index,
+                    step=step,
+                    error_message=str(e),
+                    page_url=page.url,
+                    screenshot_path=failure_screenshot_str,
+                )
 
                 # Requirement: stop on failure to keep results clear for beginner MVP.
                 break
@@ -111,6 +145,7 @@ class BrowserExecutor:
             success=failure_info is None,
             steps_executed=steps_executed,
             failure=failure_info,
+            failed_step=failed_step_details,
             console_errors=console_errors,
             screenshot_paths=screenshot_paths,
         )
@@ -125,15 +160,25 @@ class BrowserExecutor:
         step: TestStep,
         screenshots_dir: Path,
         screenshot_paths: list[str],
-    ) -> None:
+    ) -> Optional[str]:
+        """
+        Execute one validated test step.
+
+        Returns:
+        - screenshot path for `screenshot` steps
+        - None for other step types
+        """
+
         if step.action == StepAction.goto:
             page.goto(step.url, wait_until="load", timeout=step.timeout_ms)
-            return
+            self._wait_after_page_change(page, timeout_ms=step.timeout_ms)
+            return None
 
         if step.action == StepAction.click:
             locator = self._resolve_click_target(page, step.selector)
             locator.click(timeout=step.timeout_ms)
-            return
+            self._wait_after_page_change(page, timeout_ms=step.timeout_ms)
+            return None
 
         if step.action == StepAction.fill:
             if step.selector and step.selector.startswith("text="):
@@ -141,7 +186,8 @@ class BrowserExecutor:
             if not step.selector:
                 raise ValueError("fill requires `selector`.")
             page.locator(step.selector).fill(step.text or "", timeout=step.timeout_ms)
-            return
+            page.wait_for_timeout(150)
+            return None
 
         if step.action == StepAction.press:
             # Focus is optional. If a selector is given, click it first.
@@ -149,13 +195,14 @@ class BrowserExecutor:
                 locator = self._resolve_click_target(page, step.selector)
                 locator.click(timeout=step.timeout_ms)
             page.keyboard.press(step.key, timeout=step.timeout_ms)
-            return
+            self._wait_after_page_change(page, timeout_ms=step.timeout_ms)
+            return None
 
         if step.action == StepAction.assert_text:
             if not step.selector:
                 raise ValueError("assert_text requires `selector`.")
             self._assert_text(page=page, step=step)
-            return
+            return None
 
         if step.action == StepAction.screenshot:
             name = step.screenshot_name or "step_screenshot"
@@ -163,10 +210,31 @@ class BrowserExecutor:
             # Always store a full-page screenshot so reports include footer/content
             # below the initial viewport.
             self._capture_full_page_screenshot(page, file_path)
-            screenshot_paths.append(str(file_path))
-            return
+            screenshot_path = str(file_path)
+            screenshot_paths.append(screenshot_path)
+            return screenshot_path
 
         raise ValueError(f"Unknown action: {step.action}")
+
+    def _wait_after_page_change(self, page: Page, timeout_ms: int) -> None:
+        """
+        Small deterministic wait helper used after steps that may trigger new
+        content, navigation, or async UI updates.
+        """
+
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=min(timeout_ms, 5000))
+        except Exception:
+            pass
+
+        try:
+            page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 3000))
+        except Exception:
+            pass
+
+        # Give the browser a short extra moment for UI updates like carousels,
+        # drawers, or button-triggered state changes.
+        page.wait_for_timeout(200)
 
     def _resolve_click_target(self, page: Page, selector: Optional[str]):
         if not selector:
@@ -195,31 +263,56 @@ class BrowserExecutor:
         """
         Assert text using a few simple layers:
         1) direct locator lookup
-        2) full-page DOM/body/footer text search
-        3) scroll and retry for footer/below-the-fold content
+        2) Playwright text lookup for the expected text itself
+        3) full-page DOM/body/footer text search
+        4) scroll and retry for dynamic or below-the-fold content
         """
 
         selector = step.selector or ""
         expected = step.expected_text or ""
         mode = step.assertion_mode
 
-        locator_text = self._try_get_assert_text(page, selector=selector, timeout_ms=step.timeout_ms)
-        if locator_text is not None and self._text_matches(actual=locator_text, expected=expected, mode=mode):
-            return
+        deadline = time.monotonic() + (step.timeout_ms / 1000.0)
+        last_locator_text: Optional[str] = None
+        attempt = 0
 
-        if self._find_text_anywhere_on_page(page, expected=expected, mode=mode, timeout_ms=step.timeout_ms):
-            return
+        # Retry across the timeout window because some homepage sections mount
+        # after hydration, carousel init, or scrolling into view.
+        while time.monotonic() < deadline:
+            remaining_ms = max(int((deadline - time.monotonic()) * 1000), 200)
+            last_locator_text = self._try_get_assert_text(
+                page,
+                selector=selector,
+                timeout_ms=min(remaining_ms, 1200),
+            )
+            if last_locator_text is not None and self._text_matches(
+                actual=last_locator_text,
+                expected=expected,
+                mode=mode,
+            ):
+                return
 
-        self._scroll_intelligently_for_text(page, selector=selector, expected=expected)
+            if self._find_expected_text_with_playwright(
+                page=page,
+                expected=expected,
+                mode=mode,
+                timeout_ms=min(remaining_ms, 1200),
+            ):
+                return
 
-        locator_text = self._try_get_assert_text(page, selector=selector, timeout_ms=step.timeout_ms)
-        if locator_text is not None and self._text_matches(actual=locator_text, expected=expected, mode=mode):
-            return
+            if self._find_text_anywhere_on_page(
+                page,
+                expected=expected,
+                mode=mode,
+                timeout_ms=min(remaining_ms, 1200),
+            ):
+                return
 
-        if self._find_text_anywhere_on_page(page, expected=expected, mode=mode, timeout_ms=step.timeout_ms):
-            return
+            self._scroll_intelligently_for_text(page, selector=selector, expected=expected)
+            page.wait_for_timeout(250)
+            attempt += 1
 
-        actual_preview = locator_text if locator_text is not None else "<locator text not found>"
+        actual_preview = last_locator_text if last_locator_text is not None else "<locator text not found>"
         raise AssertionError(
             f"Expected text ({mode}) '{expected}', but assertion failed. "
             f"Last locator text was: '{actual_preview}'."
@@ -251,6 +344,41 @@ class BrowserExecutor:
                 text_candidates.append(footer_text)
 
         return any(self._text_matches(actual=text, expected=expected, mode=mode) for text in text_candidates)
+
+    def _find_expected_text_with_playwright(self, page: Page, expected: str, mode: str, timeout_ms: int) -> bool:
+        """
+        Ask Playwright to find the expected text directly.
+
+        This is especially useful when the planner chose a broad selector like
+        `body`, but the real text lives in a specific button, banner, or card
+        that is already present in the DOM.
+        """
+
+        try:
+            locator = page.get_by_text(expected, exact=False).first
+            if locator.count() < 1:
+                return False
+        except Exception:
+            return False
+
+        try:
+            locator.scroll_into_view_if_needed(timeout=timeout_ms)
+        except Exception:
+            pass
+
+        try:
+            actual = locator.inner_text(timeout=timeout_ms).strip()
+            if actual and self._text_matches(actual=actual, expected=expected, mode=mode):
+                return True
+        except Exception:
+            pass
+
+        try:
+            text_content = locator.text_content(timeout=timeout_ms)
+        except Exception:
+            text_content = None
+
+        return bool(text_content) and self._text_matches(actual=text_content, expected=expected, mode=mode)
 
     def _scroll_intelligently_for_text(self, page: Page, selector: str, expected: str) -> None:
         """

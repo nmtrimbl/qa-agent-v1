@@ -18,7 +18,7 @@ from models.test_report import TestReport
 def _safe_image(path: str):
     try:
         if path:
-            st.image(path, caption=path, use_column_width=True)
+            st.image(path, caption=path, width="stretch")
     except Exception:
         st.write(f"Screenshot: {path}")
 

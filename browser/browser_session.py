@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -15,6 +13,11 @@ class BrowserSession:
     Owns a single Playwright browser session + page.
 
     Requirement: "use a single browser session per test run".
+
+    This class is intentionally small. It is responsible for:
+    - starting one browser/page
+    - collecting browser console/page errors
+    - cleaning everything up at the end of the run
     """
 
     def __init__(self, headless: bool, artifacts_dir: str | Path, run_id: str):
@@ -39,6 +42,7 @@ class BrowserSession:
         return list(self._console_errors)
 
     def start(self) -> None:
+        # One browser + one page per test run keeps the MVP easier to debug.
         self._playwright = sync_playwright().start()
         browser = self._playwright.chromium.launch(headless=self.headless)
         context = browser.new_context()
@@ -67,6 +71,8 @@ class BrowserSession:
                 self._playwright.stop()
 
     def _on_console(self, msg) -> None:
+        # We only save console errors because they are the most useful signal for
+        # QA debugging in the final report.
         # msg.type is typically: "log", "debug", "info", "warning", "error"
         if msg.type == "error":
             location = None
