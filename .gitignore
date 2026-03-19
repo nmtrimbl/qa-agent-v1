@@ -1,0 +1,56 @@
+# 🔐 Environment / Secrets
+.env
+.env.*
+*.env
+config/secrets.yaml
+
+# 🧠 Virtual environments
+.venv/
+venv/
+env/
+
+# 🐍 Python cache / compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 🧪 Pytest / test artifacts
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# 📦 Build / packaging
+build/
+dist/
+*.egg-info/
+
+# 📊 Logs & runtime outputs
+logs/
+*.log
+
+# 🧠 Model outputs / generated files
+outputs/
+reports/
+screenshots/
+playwright-report/
+
+# 🌐 Streamlit
+.streamlit/secrets.toml
+
+# 🎭 Playwright
+playwright/.cache/
+playwright-report/
+test-results/
+
+# 💻 IDE / Editor
+.vscode/
+.idea/
+
+# 🖥️ OS files
+.DS_Store
+Thumbs.db
+
+# 🔄 Misc
+*.swp
+*.swo

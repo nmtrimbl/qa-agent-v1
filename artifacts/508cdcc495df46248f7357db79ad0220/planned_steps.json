@@ -1,0 +1,38 @@
+[
+  {
+    "action": "goto",
+    "url": "https://staging4.doheny.com/",
+    "selector": null,
+    "text": null,
+    "key": null,
+    "expected_text": null,
+    "assertion_mode": "contains",
+    "timeout_ms": 5000,
+    "screenshot_name": null,
+    "full_page": false
+  },
+  {
+    "action": "assert_text",
+    "url": null,
+    "selector": "body",
+    "text": null,
+    "key": null,
+    "expected_text": "Liners",
+    "assertion_mode": "contains",
+    "timeout_ms": 5000,
+    "screenshot_name": null,
+    "full_page": false
+  },
+  {
+    "action": "screenshot",
+    "url": null,
+    "selector": null,
+    "text": null,
+    "key": null,
+    "expected_text": null,
+    "assertion_mode": "contains",
+    "timeout_ms": 5000,
+    "screenshot_name": null,
+    "full_page": false
+  }
+]

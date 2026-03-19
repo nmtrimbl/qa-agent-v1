@@ -1,0 +1,4 @@
+{
+  "url": "https://staging4.doheny.com/",
+  "test_notes": "1. Open the homepage\n2. Verify the page contains the text \"Liners\"\n3. Take a screenshot"
+}

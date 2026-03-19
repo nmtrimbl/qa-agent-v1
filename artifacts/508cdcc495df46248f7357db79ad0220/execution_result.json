@@ -1,0 +1,65 @@
+{
+  "success": true,
+  "steps_executed": [
+    {
+      "step": {
+        "action": "goto",
+        "url": "https://staging4.doheny.com/",
+        "selector": null,
+        "text": null,
+        "key": null,
+        "expected_text": null,
+        "assertion_mode": "contains",
+        "timeout_ms": 5000,
+        "screenshot_name": null,
+        "full_page": false
+      },
+      "status": "ok",
+      "error_message": null
+    },
+    {
+      "step": {
+        "action": "assert_text",
+        "url": null,
+        "selector": "body",
+        "text": null,
+        "key": null,
+        "expected_text": "Liners",
+        "assertion_mode": "contains",
+        "timeout_ms": 5000,
+        "screenshot_name": null,
+        "full_page": false
+      },
+      "status": "ok",
+      "error_message": null
+    },
+    {
+      "step": {
+        "action": "screenshot",
+        "url": null,
+        "selector": null,
+        "text": null,
+        "key": null,
+        "expected_text": null,
+        "assertion_mode": "contains",
+        "timeout_ms": 5000,
+        "screenshot_name": null,
+        "full_page": false
+      },
+      "status": "ok",
+      "error_message": null
+    }
+  ],
+  "failure": null,
+  "console_errors": [
+    {
+      "kind": "page_error",
+      "message": "Cannot read properties of null (reading '_glider')",
+      "location": null,
+      "page_url": "https://staging4.doheny.com/"
+    }
+  ],
+  "screenshot_paths": [
+    "/home/noaht/ai/qa-agent-v2/artifacts/508cdcc495df46248f7357db79ad0220/screenshots/508cdcc495df46248f7357db79ad0220/step_screenshot.png"
+  ]
+}
