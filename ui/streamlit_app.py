@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import sys
-import os
+from pathlib import Path
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+# Ensure repo root is importable so `from config...` works when running
+# `streamlit run ui/streamlit_app.py` from any working directory.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
 
 import requests
 import streamlit as st

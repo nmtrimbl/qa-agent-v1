@@ -54,3 +54,5 @@ Thumbs.db
 # 🔄 Misc
 *.swp
 *.swo
+
+artifacts/

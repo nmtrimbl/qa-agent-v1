@@ -43,14 +43,9 @@ It is intentionally simple and synchronous for reliability.
 
 ## Setup (Exact Commands)
 
-From your repo root:
+From the repo root (the folder that contains `README.md`):
 
-1. Go into the project folder:
-   ```bash
-   cd ai-qa-platform
-   ```
-
-2. Create and activate a virtual environment:
+1. Create and activate a virtual environment:
    ```bash
    python -m venv .venv
    source .venv/bin/activate
@@ -80,7 +75,7 @@ From your repo root:
 
 ## Run FastAPI
 
-From `ai-qa-platform/`:
+From the repo root:
 
 ```bash
 uvicorn api.server:app --reload --port 8000
@@ -93,7 +88,7 @@ curl http://localhost:8000/health
 
 ## Run Streamlit UI
 
-From `ai-qa-platform/` (in a separate terminal):
+From the repo root (in a separate terminal):
 
 ```bash
 streamlit run ui/streamlit_app.py --server.port 8501
@@ -112,6 +107,40 @@ For `click` and `assert_text`, the executor supports:
 
 For `fill`, the executor supports CSS selectors only
 (`fill` does not support `text=...` selectors in this MVP).
+
+For `assert_text`, the executor is more forgiving than a simple viewport-only check:
+- it first tries the requested locator
+- then it searches text from the full page body / common footer containers
+- if needed, it scrolls and retries so footer text can still be found
+- text matching normalizes whitespace, smart quotes, and spacing around symbols like `©` / `®`
+
+## Test Step JSON format (what the planner returns)
+
+The planner returns a JSON object with this shape:
+
+```json
+{
+  "steps": [
+    { "action": "goto", "url": "https://example.com" },
+    { "action": "click", "selector": "text=Login" },
+    { "action": "fill", "selector": "input[name='email']", "text": "a@b.com" },
+    { "action": "press", "key": "Enter" },
+    { "action": "assert_text", "selector": "h1", "expected_text": "Welcome" },
+    { "action": "screenshot", "screenshot_name": "final", "full_page": true }
+  ]
+}
+```
+
+Supported `action` values:
+`goto`, `click`, `fill`, `press`, `assert_text`, `screenshot`.
+
+Field meanings (only the required fields need to be included per action):
+- `goto`: `url`
+- `click`: `selector` (CSS selector, or `text=Visible text` for exact text match)
+- `fill`: `selector` (CSS selector only), `text`
+- `press`: `key` (e.g. `"Enter"`)
+- `assert_text`: `selector` (CSS or `text=...`), `expected_text` (checks contains by default)
+- `screenshot`: optional `screenshot_name`, optional `full_page` (the executor stores report screenshots as full-page images)
 
 ## Outputs (Where artifacts are saved)
 

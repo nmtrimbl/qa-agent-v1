@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class StepAction(str, Enum):
@@ -23,6 +23,10 @@ class TestStep(BaseModel):
     """
 
     action: StepAction
+
+    # Enforce strict planner output: only known fields are allowed in JSON.
+    # This makes the planner retry/repair more reliable.
+    model_config = ConfigDict(extra="forbid")
 
     # For `goto`
     url: Optional[str] = None
