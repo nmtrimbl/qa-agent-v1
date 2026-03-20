@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from io import BytesIO
 import re
 import traceback
 import unicodedata
@@ -8,6 +9,7 @@ import time
 from typing import Optional
 
 from playwright.sync_api import Page
+from PIL import Image
 from pydantic import BaseModel
 
 from browser.browser_session import BrowserSession
@@ -45,8 +47,37 @@ class BrowserExecutor:
 
     def __init__(self, artifacts_dir: str | Path):
         self.artifacts_dir = Path(artifacts_dir)
+        self._auto_accept_cookies = True
 
     FOOTER_SELECTORS = ("footer", "[role='contentinfo']", ".footer")
+    COOKIE_SIGNAL_WORDS = ("cookie", "cookies", "consent", "privacy", "gdpr")
+    COOKIE_ACCEPT_SELECTORS = (
+        "button.cky-btn-accept",
+        "text=Acknowledge",
+        "#onetrust-accept-btn-handler",
+        "[data-testid='uc-accept-all-button']",
+    )
+    POPUP_CLOSE_SELECTORS = (
+        ".modal-popup button[aria-label='Close']",
+        ".modal-popup button[aria-label='close']",
+        "[role='dialog'] button[aria-label='Close']",
+        "[role='dialog'] button[aria-label='close']",
+        ".newsletter-popup button[aria-label='Close']",
+        ".newsletter-popup button[aria-label='close']",
+        ".fancybox-close-small",
+        "text=No Thanks",
+        "text=Close",
+    )
+    REMOVABLE_BLOCKER_SELECTORS = (
+        ".cky-consent-container",
+        ".cky-modal",
+        ".cky-overlay",
+        "#attentive_creative",
+        "iframe[src*='attn.tv']",
+        ".newsletter-popup",
+        ".modal-popup._show",
+    )
+    MAX_VIEWPORT_CAPTURE_HEIGHT = 12000
 
     def execute(
         self,
@@ -60,6 +91,7 @@ class BrowserExecutor:
 
         page = session.page
         screenshots_dir = ensure_dir(self.artifacts_dir / "screenshots" / run_id)
+        self._auto_accept_cookies = self._should_auto_accept_cookies(steps)
 
         steps_executed: list[StepExecution] = []
         screenshot_paths: list[str] = []
@@ -222,6 +254,16 @@ class BrowserExecutor:
         content, navigation, or async UI updates.
         """
 
+        self._wait_for_page_ready(page, timeout_ms=timeout_ms)
+
+    def _wait_for_page_ready(self, page: Page, timeout_ms: int) -> None:
+        """
+        Best-effort page settle helper.
+
+        This waits for normal browser load states and then gives images/fonts a
+        short chance to finish so screenshots look closer to a real user view.
+        """
+
         try:
             page.wait_for_load_state("domcontentloaded", timeout=min(timeout_ms, 5000))
         except Exception:
@@ -232,9 +274,49 @@ class BrowserExecutor:
         except Exception:
             pass
 
-        # Give the browser a short extra moment for UI updates like carousels,
-        # drawers, or button-triggered state changes.
-        page.wait_for_timeout(200)
+        try:
+            page.evaluate(
+                """async (timeoutMs) => {
+                    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+                    const withTimeout = async (promise) => {
+                        await Promise.race([promise, wait(timeoutMs)]);
+                    };
+
+                    try {
+                        if (document.fonts && document.fonts.ready) {
+                            await withTimeout(document.fonts.ready);
+                        }
+                    } catch (err) {
+                        // Ignore font readiness problems.
+                    }
+
+                    try {
+                        const pendingImages = Array.from(document.images || [])
+                            .filter((img) => !img.complete)
+                            .slice(0, 50)
+                            .map(
+                                (img) =>
+                                    new Promise((resolve) => {
+                                        img.addEventListener("load", resolve, { once: true });
+                                        img.addEventListener("error", resolve, { once: true });
+                                        setTimeout(resolve, timeoutMs);
+                                    })
+                            );
+                        if (pendingImages.length) {
+                            await withTimeout(Promise.all(pendingImages));
+                        }
+                    } catch (err) {
+                        // Ignore image readiness problems.
+                    }
+                }""",
+                min(timeout_ms, 2000),
+            )
+        except Exception:
+            pass
+
+        # Give the browser a short extra moment for UI updates like carousels
+        # or delayed hydration after the main load event.
+        page.wait_for_timeout(250)
 
     def _resolve_click_target(self, page: Page, selector: Optional[str]):
         if not selector:
@@ -407,56 +489,268 @@ class BrowserExecutor:
         """
         Capture a true full-page screenshot.
 
-        Some sites only render footer or below-the-fold sections after scrolling,
-        so we walk down the page first to trigger lazy content, then capture the
-        full-page image and restore the previous scroll position.
+        Some sites do not use the normal browser scroll root, so a naive
+        `page.screenshot(full_page=True)` can miss content. We first prepare the
+        page like a real user would experience it, then capture the whole height
+        by resizing the viewport to the content size. If that is too tall for one
+        shot, we fall back to stitching viewport images together.
         """
 
-        metrics = self._get_page_metrics(page)
-        original_y = metrics["current_y"]
-        viewport_height = metrics["viewport_height"]
-        scroll_height = metrics["scroll_height"]
+        metrics_before = self._get_page_metrics(page)
+        original_y = metrics_before["current_y"]
+        original_viewport = getattr(page, "viewport_size", None) or {
+            "width": metrics_before["viewport_width"],
+            "height": metrics_before["viewport_height"],
+        }
 
-        # Trigger lazy-loaded sections before the final full-page screenshot.
-        step_size = max(viewport_height - 120, 250)
-        scroll_positions = list(range(0, max(scroll_height, 1), step_size))
+        try:
+            self._prepare_page_for_full_page_capture(page)
+            metrics = self._get_page_metrics(page)
 
-        for position in scroll_positions:
-            page.evaluate(f"window.scrollTo(0, {position})")
-            page.wait_for_timeout(120)
+            capture_width = max(metrics["content_width"], original_viewport["width"])
+            capture_height = max(metrics["scroll_height"], metrics["viewport_height"])
 
-        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        page.wait_for_timeout(250)
+            if capture_height <= self.MAX_VIEWPORT_CAPTURE_HEIGHT:
+                self._capture_with_resized_viewport(
+                    page=page,
+                    file_path=file_path,
+                    width=capture_width,
+                    height=capture_height,
+                )
+            else:
+                self._capture_with_stitching(page=page, file_path=file_path, metrics=metrics)
+        finally:
+            try:
+                if hasattr(page, "set_viewport_size"):
+                    page.set_viewport_size(original_viewport)
+            except Exception:
+                pass
 
-        page.screenshot(path=str(file_path), full_page=True)
+            self._scroll_page(page, y=original_y, scroll_root=metrics_before["scroll_root"])
+            page.wait_for_timeout(150)
 
-        # Restore the user's prior scroll location so later steps behave predictably.
-        page.evaluate(f"window.scrollTo(0, {original_y})")
-        page.wait_for_timeout(100)
+    def _prepare_page_for_full_page_capture(self, page: Page) -> None:
+        self._wait_for_page_ready(page, timeout_ms=5000)
 
-    def _get_page_metrics(self, page: Page) -> dict[str, int]:
+        previous_height = 0
+        for _ in range(3):
+            self._dismiss_blocking_overlays(page)
+            self._wait_for_page_ready(page, timeout_ms=2500)
+
+            metrics = self._get_page_metrics(page)
+            step_size = max(metrics["viewport_height"] - 120, 300)
+            for position in range(0, max(metrics["scroll_height"], 1), step_size):
+                self._scroll_page(page, y=position, scroll_root=metrics["scroll_root"])
+                page.wait_for_timeout(180)
+
+            self._scroll_page(page, y=metrics["scroll_height"], scroll_root=metrics["scroll_root"])
+            page.wait_for_timeout(350)
+            self._wait_for_page_ready(page, timeout_ms=2000)
+
+            refreshed_metrics = self._get_page_metrics(page)
+            if refreshed_metrics["scroll_height"] <= previous_height + 80:
+                break
+            previous_height = refreshed_metrics["scroll_height"]
+
+        final_metrics = self._get_page_metrics(page)
+        self._scroll_to_true_top(page)
+        self._dismiss_blocking_overlays(page)
+        self._wait_for_page_ready(page, timeout_ms=2000)
+
+    def _dismiss_blocking_overlays(self, page: Page) -> None:
+        """
+        Accept cookies by default and close common blocking overlays before a
+        screenshot. The selectors stay intentionally narrow to avoid hiding the
+        real page content.
+        """
+
+        if hasattr(page, "locator") and self._auto_accept_cookies:
+            for selector in self.COOKIE_ACCEPT_SELECTORS:
+                try:
+                    locator = page.locator(selector).first
+                    if locator.count() > 0 and locator.is_visible():
+                        locator.click(timeout=1500)
+                        page.wait_for_timeout(250)
+                except Exception:
+                    pass
+
+        if hasattr(page, "locator"):
+            for selector in self.POPUP_CLOSE_SELECTORS:
+                try:
+                    locator = page.locator(selector).first
+                    if locator.count() > 0 and locator.is_visible():
+                        locator.click(timeout=1500)
+                        page.wait_for_timeout(250)
+                except Exception:
+                    pass
+
+        try:
+            page.evaluate(
+                """({ selectors, removeCookies }) => {
+                    const shouldRemove = (selector) => {
+                        if (!removeCookies && selector.startsWith('.cky')) {
+                            return false;
+                        }
+                        return true;
+                    };
+
+                    for (const selector of selectors) {
+                        if (!shouldRemove(selector)) {
+                            continue;
+                        }
+                        for (const node of document.querySelectorAll(selector)) {
+                            node.remove();
+                        }
+                    }
+                }""",
+                {
+                    "selectors": list(self.REMOVABLE_BLOCKER_SELECTORS),
+                    "removeCookies": self._auto_accept_cookies,
+                },
+            )
+        except Exception:
+            pass
+
+    def _should_auto_accept_cookies(self, steps: list[TestStep]) -> bool:
+        """
+        Auto-accept cookies unless the planned test appears to explicitly care
+        about cookie/privacy UI.
+        """
+
+        for step in steps:
+            text_parts = [
+                step.selector or "",
+                step.text or "",
+                step.expected_text or "",
+                step.screenshot_name or "",
+            ]
+            combined = " ".join(text_parts).lower()
+            if any(word in combined for word in self.COOKIE_SIGNAL_WORDS):
+                return False
+        return True
+
+    def _capture_with_resized_viewport(self, page: Page, file_path: Path, width: int, height: int) -> None:
+        if hasattr(page, "set_viewport_size"):
+            page.set_viewport_size({"width": int(width), "height": int(height)})
+            page.wait_for_timeout(500)
+            self._wait_for_page_ready(page, timeout_ms=1500)
+        self._scroll_to_true_top(page)
+        page.wait_for_timeout(150)
+        page.screenshot(path=str(file_path), full_page=False)
+
+    def _capture_with_stitching(self, page: Page, file_path: Path, metrics: dict[str, int | str]) -> None:
+        """
+        Fallback for very tall pages when one giant viewport would be too large.
+        """
+
+        viewport_height = int(metrics["viewport_height"])
+        capture_width = int(metrics["content_width"])
+        scroll_height = int(metrics["scroll_height"])
+        scroll_root = str(metrics["scroll_root"])
+
+        if hasattr(page, "set_viewport_size"):
+            page.set_viewport_size({"width": int(capture_width), "height": int(viewport_height)})
+            page.wait_for_timeout(300)
+
+        stitched = Image.new("RGB", (capture_width, scroll_height), "white")
+        y = 0
+        while y < scroll_height:
+            self._scroll_page(page, y=y, scroll_root=scroll_root)
+            page.wait_for_timeout(200)
+            screenshot_bytes = page.screenshot(full_page=False)
+            slice_image = Image.open(BytesIO(screenshot_bytes)).convert("RGB")
+
+            remaining_height = scroll_height - y
+            crop_height = min(slice_image.height, remaining_height)
+            if crop_height != slice_image.height:
+                slice_image = slice_image.crop((0, 0, slice_image.width, crop_height))
+
+            stitched.paste(slice_image, (0, y))
+            y += crop_height
+
+        stitched.save(file_path)
+
+    def _scroll_page(self, page: Page, y: int, scroll_root: str) -> None:
+        try:
+            page.evaluate(
+                """({ y, scrollRoot }) => {
+                    const nextY = Math.max(0, Math.floor(y || 0));
+                    if (scrollRoot === "body" && document.body) {
+                        document.body.scrollTop = nextY;
+                    } else {
+                        document.documentElement.scrollTop = nextY;
+                        window.scrollTo(0, nextY);
+                    }
+                }""",
+                {"y": y, "scrollRoot": scroll_root},
+            )
+        except Exception:
+            pass
+
+    def _scroll_to_true_top(self, page: Page) -> None:
+        try:
+            page.evaluate(
+                """() => {
+                    if (document.body) {
+                        document.body.scrollTop = 0;
+                    }
+                    if (document.documentElement) {
+                        document.documentElement.scrollTop = 0;
+                    }
+                    window.scrollTo(0, 0);
+                }"""
+            )
+        except Exception:
+            pass
+
+    def _get_page_metrics(self, page: Page) -> dict[str, int | str]:
         try:
             return page.evaluate(
                 """() => {
                     const body = document.body;
                     const doc = document.documentElement;
+                    const bodyScrollHeight = body ? body.scrollHeight : 0;
+                    const docScrollHeight = doc ? doc.scrollHeight : 0;
+                    const scrollRoot =
+                        bodyScrollHeight > docScrollHeight + 100 ? "body" : "documentElement";
+                    const currentY =
+                        scrollRoot === "body"
+                            ? Math.floor(body ? body.scrollTop : 0)
+                            : Math.floor((window.scrollY || (doc ? doc.scrollTop : 0)) || 0);
                     const scrollHeight = Math.max(
-                        body ? body.scrollHeight : 0,
-                        doc ? doc.scrollHeight : 0,
+                        bodyScrollHeight,
+                        docScrollHeight,
                         body ? body.offsetHeight : 0,
                         doc ? doc.offsetHeight : 0,
                     );
+                    const contentWidth = Math.max(
+                        body ? body.scrollWidth : 0,
+                        doc ? doc.scrollWidth : 0,
+                        body ? body.clientWidth : 0,
+                        doc ? doc.clientWidth : 0,
+                        Math.floor(window.innerWidth || 0),
+                    );
 
                     return {
-                        current_y: Math.floor(window.scrollY || 0),
+                        scroll_root: scrollRoot,
+                        current_y: currentY,
+                        viewport_width: Math.floor(window.innerWidth || 1280),
                         viewport_height: Math.floor(window.innerHeight || 800),
                         scroll_height: Math.floor(scrollHeight || 0),
+                        content_width: Math.floor(contentWidth || 1280),
                     };
                 }"""
             )
         except Exception:
             # Safe fallback if page metrics are unavailable for some reason.
-            return {"current_y": 0, "viewport_height": 800, "scroll_height": 2000}
+            return {
+                "scroll_root": "documentElement",
+                "current_y": 0,
+                "viewport_width": 1280,
+                "viewport_height": 800,
+                "scroll_height": 2000,
+                "content_width": 1280,
+            }
 
     def _safe_inner_text(self, locator, timeout_ms: int) -> Optional[str]:
         try:

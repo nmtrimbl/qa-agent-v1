@@ -14,6 +14,7 @@ from models.test_report import TestReport
 
 
 class ReportText(BaseModel):
+    test_summary: str = Field(default="")
     failure_summary: str = Field(default="")
 
 
@@ -43,11 +44,20 @@ def generate_report(*, run_id: str, url: str, execution_result: ExecutionResult,
     """
 
     overall_status = "PASS" if execution_result.success else "FAIL"
+    final_url = _get_final_url(url=url, execution_result=execution_result)
 
+    test_summary = ""
     failure_summary = ""
     if overall_status == "PASS":
+        test_summary = f"PASS: {len(execution_result.steps_executed)} planned steps completed successfully."
         failure_summary = "PASS: All planned steps completed successfully."
     else:
+        test_summary = (
+            f"FAIL: The run stopped after {len(execution_result.steps_executed)} executed step(s). "
+            f"The failed step was step {execution_result.failed_step.step_index + 1}."
+            if execution_result.failed_step
+            else "FAIL: The automated run stopped because a step failed."
+        )
         failure_summary = bug_analysis.failure_summary or "FAIL: A test step failed."
 
     # Improve summary with LLM if key is present.
@@ -56,9 +66,9 @@ def generate_report(*, run_id: str, url: str, execution_result: ExecutionResult,
         client = OpenAI(api_key=settings.openai_api_key)
 
         system_prompt = (
-            "You are generating a QA report section for a failed automated test.\n"
-            "Write a short, beginner-friendly failure summary.\n"
-            "Return ONLY JSON: {\"failure_summary\": \"...\"}."
+            "You are generating a QA report summary for an automated test.\n"
+            "Write a short, beginner-friendly test summary and failure summary.\n"
+            "Return ONLY JSON: {\"test_summary\": \"...\", \"failure_summary\": \"...\"}."
         )
 
         failure_step = execution_result.steps_executed[-1] if execution_result.steps_executed else None
@@ -71,6 +81,10 @@ def generate_report(*, run_id: str, url: str, execution_result: ExecutionResult,
             "error_message": execution_result.failure.error_message if execution_result.failure else None,
             "likely_causes": bug_analysis.likely_causes,
             "suggestions": bug_analysis.suggestions,
+            "likely_failure_cause": bug_analysis.likely_failure_cause,
+            "reproduction_notes": bug_analysis.reproduction_notes,
+            "severity_guess": bug_analysis.severity_guess,
+            "final_url": final_url,
             "console_errors": [e.model_dump(mode="json") for e in execution_result.console_errors][:10],
         }
 
@@ -86,6 +100,8 @@ def generate_report(*, run_id: str, url: str, execution_result: ExecutionResult,
             )
             data = _extract_json_object(resp.choices[0].message.content or "")
             report_text = ReportText.model_validate(data)
+            if report_text.test_summary.strip():
+                test_summary = report_text.test_summary.strip()
             if report_text.failure_summary.strip():
                 failure_summary = report_text.failure_summary.strip()
         except Exception:
@@ -95,8 +111,13 @@ def generate_report(*, run_id: str, url: str, execution_result: ExecutionResult,
     report = TestReport(
         run_id=run_id,
         url=url,
+        final_url=final_url,
         overall_status=overall_status,  # type: ignore[arg-type]
+        test_summary=test_summary,
         failure_summary=failure_summary,
+        likely_failure_cause=bug_analysis.likely_failure_cause,
+        reproduction_notes=bug_analysis.reproduction_notes,
+        severity_guess=bug_analysis.severity_guess,
         steps_executed=execution_result.steps_executed,
         failed_step=execution_result.failed_step,
         console_errors=execution_result.console_errors,
@@ -104,4 +125,16 @@ def generate_report(*, run_id: str, url: str, execution_result: ExecutionResult,
         page_url_at_failure=execution_result.failure.page_url_at_failure if execution_result.failure else None,
     )
     return report
+
+
+def _get_final_url(*, url: str, execution_result: ExecutionResult) -> str:
+    if execution_result.failed_step and execution_result.failed_step.page_url:
+        return execution_result.failed_step.page_url
+    if execution_result.steps_executed:
+        last_step = execution_result.steps_executed[-1]
+        if last_step.page_url:
+            return last_step.page_url
+    if execution_result.failure and execution_result.failure.page_url_at_failure:
+        return execution_result.failure.page_url_at_failure
+    return url
 

@@ -59,6 +59,9 @@ def run_qa_test_pipeline(*, url: str, test_notes: str) -> TestReport:
     if execution_result.success:
         bug_analysis = BugAnalysis(
             failure_summary="PASS: All planned steps completed successfully.",
+            likely_failure_cause="",
+            reproduction_notes="",
+            severity_guess="low",
             likely_causes=[],
             suggestions=[],
         )

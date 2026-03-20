@@ -50,9 +50,14 @@ class TestReport(BaseModel):
 
     run_id: str
     url: str
+    final_url: Optional[str] = None
 
     overall_status: Literal["PASS", "FAIL"]
+    test_summary: str = ""
     failure_summary: str = ""
+    likely_failure_cause: str = ""
+    reproduction_notes: str = ""
+    severity_guess: Optional[Literal["low", "medium", "high"]] = None
 
     steps_executed: list[StepExecution] = Field(default_factory=list)
     failed_step: Optional[FailedStepDetails] = None

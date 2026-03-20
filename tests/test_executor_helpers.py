@@ -37,22 +37,56 @@ class FakePage:
         self.screenshot_calls = []
         self.goto_calls = []
         self.url = "about:blank"
+        self.viewport_size = {"width": 1280, "height": 800}
+        self.viewport_size_calls = []
 
     def goto(self, url, wait_until, timeout):
         self.goto_calls.append({"url": url, "wait_until": wait_until, "timeout": timeout})
         self.url = url
 
-    def evaluate(self, script):
+    def evaluate(self, script, arg=None):
         self.evaluate_calls.append(script)
-        if "current_y" in script:
-            return {"current_y": 140, "viewport_height": 800, "scroll_height": 2200}
+        if "scroll_root" in script:
+            return {
+                "scroll_root": "body",
+                "current_y": 140,
+                "viewport_width": self.viewport_size["width"],
+                "viewport_height": self.viewport_size["height"],
+                "scroll_height": 2200,
+                "content_width": 1280,
+            }
         return None
 
     def wait_for_timeout(self, ms):
         self.wait_calls.append(ms)
 
+    def wait_for_load_state(self, state, timeout):
+        self.wait_calls.append((state, timeout))
+
+    def set_viewport_size(self, viewport):
+        self.viewport_size_calls.append(viewport)
+        self.viewport_size = dict(viewport)
+
     def screenshot(self, *, path, full_page):
         self.screenshot_calls.append({"path": path, "full_page": full_page})
+
+    def locator(self, selector):
+        return FakeLocator()
+
+
+class FakeLocator:
+    @property
+    def first(self):
+        return self
+
+    def count(self):
+        return 0
+
+    def is_visible(self):
+        return False
+
+    def click(self, timeout):
+        return None
 
 
 def test_capture_full_page_screenshot_scrolls_and_restores_position(tmp_path):
@@ -62,9 +96,9 @@ def test_capture_full_page_screenshot_scrolls_and_restores_position(tmp_path):
 
     executor._capture_full_page_screenshot(page, output_path)
 
-    assert page.screenshot_calls == [{"path": str(output_path), "full_page": True}]
-    assert any("window.scrollTo(0, document.body.scrollHeight)" in call for call in page.evaluate_calls)
-    assert any("window.scrollTo(0, 140)" in call for call in page.evaluate_calls)
+    assert page.screenshot_calls == [{"path": str(output_path), "full_page": False}]
+    assert page.viewport_size_calls[0] == {"width": 1280, "height": 2200}
+    assert page.viewport_size_calls[-1] == {"width": 1280, "height": 800}
 
 
 class FakeSession:

@@ -57,7 +57,12 @@ def test_report_can_include_failed_step_details():
     report = TestReport(
         run_id="run-1",
         url="https://example.com",
+        final_url="https://example.com/login",
         overall_status="FAIL",
+        test_summary="The login check failed.",
+        likely_failure_cause="The login button was not found.",
+        reproduction_notes="Open the login page and try the Login button again.",
+        severity_guess="medium",
         failed_step=FailedStepDetails(
             step_index=1,
             step=step,
@@ -67,6 +72,9 @@ def test_report_can_include_failed_step_details():
         ),
     )
     assert report.failed_step is not None
+    assert report.final_url == "https://example.com/login"
+    assert report.test_summary == "The login check failed."
+    assert report.severity_guess == "medium"
     assert report.failed_step.step_index == 1
     assert report.failed_step.error_message == "Button not found"
 

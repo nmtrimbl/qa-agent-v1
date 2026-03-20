@@ -23,6 +23,111 @@ def _safe_image(path: str):
         st.write(f"Screenshot: {path}")
 
 
+def _render_summary(report: TestReport) -> None:
+    status_col, severity_col, url_col = st.columns(3)
+    status_col.metric("Status", report.overall_status)
+    severity_col.metric("Severity", (report.severity_guess or "n/a").upper())
+    url_col.metric("Executed Steps", str(len(report.steps_executed)))
+
+    if report.test_summary:
+        st.subheader("Test Summary")
+        st.write(report.test_summary)
+
+    if report.failure_summary:
+        st.subheader("Failure Summary")
+        st.write(report.failure_summary)
+
+    if report.likely_failure_cause:
+        st.subheader("Likely Failure Cause")
+        st.write(report.likely_failure_cause)
+
+    if report.reproduction_notes:
+        st.subheader("Reproduction Notes")
+        st.write(report.reproduction_notes)
+
+    st.caption(f"Run ID: {report.run_id}")
+    st.caption(f"Start URL: {report.url}")
+    if report.final_url:
+        st.caption(f"Final URL: {report.final_url}")
+
+
+def _render_steps(report: TestReport) -> None:
+    st.subheader("Executed Steps")
+    rows = []
+    for step_exec in report.steps_executed:
+        rows.append(
+            {
+                "Step": step_exec.step_index + 1,
+                "Action": step_exec.step.action.value,
+                "Status": step_exec.status,
+                "Selector": step_exec.step.selector or "",
+                "Expected Text": step_exec.step.expected_text or "",
+                "Page URL": step_exec.page_url or "",
+            }
+        )
+
+    if rows:
+        st.dataframe(rows, width="stretch", hide_index=True)
+    else:
+        st.write("No executed steps were recorded.")
+
+    for step_exec in report.steps_executed:
+        if step_exec.error_message:
+            with st.expander(f"Step {step_exec.step_index + 1} error details"):
+                st.code(step_exec.error_message)
+                if step_exec.screenshot_path:
+                    _safe_image(step_exec.screenshot_path)
+
+
+def _render_failure_details(report: TestReport) -> None:
+    st.subheader("Failure Details")
+    if not report.failed_step:
+        st.write("No failed step details were recorded.")
+        return
+
+    failed_step = report.failed_step
+    st.write(f"Failed step: {failed_step.step_index + 1}")
+    st.write(f"Action: {failed_step.step.action.value}")
+    if failed_step.step.selector:
+        st.write(f"Selector: `{failed_step.step.selector}`")
+    if failed_step.step.expected_text:
+        st.write(f"Expected text: `{failed_step.step.expected_text}`")
+    if failed_step.page_url:
+        st.write(f"Page URL: {failed_step.page_url}")
+    st.code(failed_step.error_message)
+    if failed_step.screenshot_path:
+        _safe_image(failed_step.screenshot_path)
+
+
+def _render_console_errors(report: TestReport) -> None:
+    st.subheader("Console Errors")
+    if not report.console_errors:
+        st.write("No console errors captured.")
+        return
+
+    rows = []
+    for err in report.console_errors:
+        rows.append(
+            {
+                "Kind": err.kind,
+                "Message": err.message,
+                "Location": err.location or "",
+                "Page URL": err.page_url or "",
+            }
+        )
+    st.dataframe(rows, width="stretch", hide_index=True)
+
+
+def _render_screenshots(report: TestReport) -> None:
+    st.subheader("Screenshots")
+    if not report.screenshot_paths:
+        st.write("No screenshots captured.")
+        return
+
+    for path in report.screenshot_paths:
+        _safe_image(path)
+
+
 def main() -> None:
     st.set_page_config(page_title="AI QA Testing Platform", layout="wide")
 
@@ -61,36 +166,29 @@ def main() -> None:
 
             report = run_qa_test_pipeline(url=url, test_notes=test_notes)
 
-    st.success(f"Overall: {report.overall_status}")
-    st.caption(f"Run ID: {report.run_id}")
-
-    if report.failure_summary:
-        st.subheader("Failure Summary")
-        st.write(report.failure_summary)
-
-    st.subheader("Steps Executed")
-    for idx, step_exec in enumerate(report.steps_executed, start=1):
-        st.write(f"{idx}. {step_exec.step.action.value} - {step_exec.status}")
-        if step_exec.error_message:
-            st.code(step_exec.error_message)
-
-    st.subheader("Console Errors")
-    if report.console_errors:
-        for err in report.console_errors:
-            st.write(f"- {err.kind}: {err.message}")
-            if err.location:
-                st.write(f"  location: {err.location}")
-            if err.page_url:
-                st.write(f"  page_url: {err.page_url}")
+    if report.overall_status == "PASS":
+        st.success("Test passed.")
     else:
-        st.write("No console errors captured.")
+        st.error("Test failed.")
 
-    st.subheader("Screenshots")
-    if report.screenshot_paths:
-        for path in report.screenshot_paths:
-            _safe_image(path)
-    else:
-        st.write("No screenshots captured.")
+    summary_tab, steps_tab, failure_tab, console_tab, screenshots_tab = st.tabs(
+        ["Summary", "Steps", "Failure Details", "Console Errors", "Screenshots"]
+    )
+
+    with summary_tab:
+        _render_summary(report)
+
+    with steps_tab:
+        _render_steps(report)
+
+    with failure_tab:
+        _render_failure_details(report)
+
+    with console_tab:
+        _render_console_errors(report)
+
+    with screenshots_tab:
+        _render_screenshots(report)
 
 
 if __name__ == "__main__":
