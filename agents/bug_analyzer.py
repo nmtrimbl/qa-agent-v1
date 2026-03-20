@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any, Literal, Optional
 
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
-from config.settings import get_settings
 from browser.executor import ExecutionResult
+from config.settings import get_settings
+from utils.json_helpers import extract_json_object
+from utils.report_helpers import get_final_url
 
 
 class BugAnalysis(BaseModel):
@@ -19,17 +20,6 @@ class BugAnalysis(BaseModel):
     severity_guess: Literal["low", "medium", "high"] = "medium"
     likely_causes: list[str] = Field(default_factory=list)
     suggestions: list[str] = Field(default_factory=list)
-
-
-def _extract_json_object(text: str) -> dict[str, Any]:
-    text = text.strip()
-    text = re.sub(r"^```(?:json)?\\s*", "", text)
-    text = re.sub(r"```\\s*$", "", text)
-    if not (text.startswith("{") and text.endswith("}")):
-        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
-        if match:
-            text = match.group(0)
-    return json.loads(text)
 
 
 def analyze_failure(
@@ -50,7 +40,7 @@ def analyze_failure(
         # Keep the app runnable without an LLM key.
         failure = execution_result.failure
         failed_step = execution_result.failed_step
-        final_url = _get_final_url(url=url, execution_result=execution_result)
+        final_url = get_final_url(url=url, execution_result=execution_result)
         return BugAnalysis(
             failure_summary=(failure.error_message if failure else "Test failed."),
             likely_failure_cause=(failure.error_message if failure else "The automated check failed."),
@@ -78,7 +68,7 @@ def analyze_failure(
         return BugAnalysis(failure_summary="No failure details found.")
 
     failed_step = execution_result.failed_step
-    final_url = _get_final_url(url=url, execution_result=execution_result)
+    final_url = get_final_url(url=url, execution_result=execution_result)
 
     client = OpenAI(api_key=settings.openai_api_key)
 
@@ -152,7 +142,7 @@ def analyze_failure(
         response_text = resp.choices[0].message.content or ""
 
     try:
-        data = _extract_json_object(response_text)
+        data = extract_json_object(response_text)
         return BugAnalysis.model_validate(data)
     except Exception:
         return BugAnalysis(
@@ -163,20 +153,6 @@ def analyze_failure(
             likely_causes=[],
             suggestions=[],
         )
-
-
-def _get_final_url(*, url: str, execution_result: ExecutionResult) -> str:
-    if execution_result.failed_step and execution_result.failed_step.page_url:
-        return execution_result.failed_step.page_url
-    if execution_result.steps_executed:
-        last_step = execution_result.steps_executed[-1]
-        if last_step.page_url:
-            return last_step.page_url
-    if execution_result.failure and execution_result.failure.page_url_at_failure:
-        return execution_result.failure.page_url_at_failure
-    return url
-
-
 def _build_fallback_reproduction_notes(*, failed_step, final_url: str) -> str:
     if failed_step is None:
         return f"Open the page and repeat the planned flow until the failure appears. Final URL: {final_url}"

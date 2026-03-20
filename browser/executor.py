@@ -46,7 +46,7 @@ class BrowserExecutor:
     """
 
     def __init__(self, artifacts_dir: str | Path):
-        self.artifacts_dir = Path(artifacts_dir)
+        self.artifacts_dir = ensure_dir(artifacts_dir)
         self._auto_accept_cookies = True
 
     FOOTER_SELECTORS = ("footer", "[role='contentinfo']", ".footer")

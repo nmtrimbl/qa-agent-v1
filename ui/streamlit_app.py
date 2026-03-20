@@ -6,7 +6,11 @@ from pathlib import Path
 # Ensure repo root is importable so `from config...` works when running
 # `streamlit run ui/streamlit_app.py` from any working directory.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+from utils.runtime import ensure_project_root_on_path
+
+ensure_project_root_on_path(PROJECT_ROOT)
 
 import requests
 import streamlit as st

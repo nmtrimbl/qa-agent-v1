@@ -12,6 +12,7 @@ from browser.executor import BrowserExecutor
 from config.settings import get_settings
 from models.test_report import TestReport
 from utils.file_helpers import ensure_dir, new_run_id, write_json
+from utils.runtime import ensure_runtime_directories
 
 
 def run_qa_test_pipeline(*, url: str, test_notes: str) -> TestReport:
@@ -28,6 +29,7 @@ def run_qa_test_pipeline(*, url: str, test_notes: str) -> TestReport:
     settings = get_settings()
     run_id = new_run_id()
 
+    ensure_runtime_directories(artifacts_dir=settings.artifacts_dir, logs_dir=settings.logs_dir)
     run_artifacts_dir = ensure_dir(Path(settings.artifacts_dir) / run_id)
     logs_dir = ensure_dir(settings.logs_dir)
     log_path = logs_dir / f"{run_id}.log"

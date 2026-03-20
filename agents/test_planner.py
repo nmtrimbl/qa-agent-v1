@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any, Optional
 
 from openai import OpenAI
@@ -9,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from config.settings import get_settings
 from models.test_step import StepAction, TestStep
+from utils.json_helpers import strip_markdown_code_fences
 
 
 class PlannerOutput(BaseModel):
@@ -25,25 +25,12 @@ class PlannerOutput(BaseModel):
 SUPPORTED_ACTIONS = {a.value for a in StepAction}
 
 
-def _strip_code_fences(text: str) -> str:
-    """
-    Remove ```json ... ``` fences if the model included them.
-    """
-
-    text = text.strip()
-    # If the LLM wraps JSON in markdown code fences, remove them before json.loads().
-    # Note: use `\s*` (not `\\s*`) so regex understands "whitespace".
-    text = re.sub(r"^```(?:json)?\s*", "", text)
-    text = re.sub(r"```\s*$", "", text)
-    return text
-
-
 def _load_planner_output(text: str) -> PlannerOutput:
     """
     Parse JSON and validate it against `PlannerOutput` (Pydantic).
     """
 
-    clean = _strip_code_fences(text)
+    clean = strip_markdown_code_fences(text)
     data = json.loads(clean)
     return PlannerOutput.model_validate(data)
 

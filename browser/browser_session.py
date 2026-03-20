@@ -6,6 +6,7 @@ from typing import Optional
 from playwright.sync_api import Page, sync_playwright
 
 from models.test_report import ConsoleError
+from utils.file_helpers import ensure_dir
 
 
 class BrowserSession:
@@ -22,7 +23,7 @@ class BrowserSession:
 
     def __init__(self, headless: bool, artifacts_dir: str | Path, run_id: str):
         self.headless = headless
-        self.artifacts_dir = Path(artifacts_dir)
+        self.artifacts_dir = ensure_dir(artifacts_dir)
         self.run_id = run_id
 
         self._playwright = None

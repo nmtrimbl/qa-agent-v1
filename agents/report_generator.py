@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
-from typing import Any, Optional
 
 from openai import OpenAI
 from pydantic import BaseModel, Field
@@ -11,22 +9,13 @@ from agents.bug_analyzer import BugAnalysis
 from browser.executor import ExecutionResult
 from config.settings import get_settings
 from models.test_report import TestReport
+from utils.json_helpers import extract_json_object
+from utils.report_helpers import get_final_url
 
 
 class ReportText(BaseModel):
     test_summary: str = Field(default="")
     failure_summary: str = Field(default="")
-
-
-def _extract_json_object(text: str) -> dict[str, Any]:
-    text = text.strip()
-    text = re.sub(r"^```(?:json)?\\s*", "", text)
-    text = re.sub(r"```\\s*$", "", text)
-    if not (text.startswith("{") and text.endswith("}")):
-        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
-        if match:
-            text = match.group(0)
-    return json.loads(text)
 
 
 def generate_report(*, run_id: str, url: str, execution_result: ExecutionResult, bug_analysis: BugAnalysis) -> TestReport:
@@ -44,7 +33,7 @@ def generate_report(*, run_id: str, url: str, execution_result: ExecutionResult,
     """
 
     overall_status = "PASS" if execution_result.success else "FAIL"
-    final_url = _get_final_url(url=url, execution_result=execution_result)
+    final_url = get_final_url(url=url, execution_result=execution_result)
 
     test_summary = ""
     failure_summary = ""
@@ -98,7 +87,7 @@ def generate_report(*, run_id: str, url: str, execution_result: ExecutionResult,
                 ],
                 response_format={"type": "json_object"},
             )
-            data = _extract_json_object(resp.choices[0].message.content or "")
+            data = extract_json_object(resp.choices[0].message.content or "")
             report_text = ReportText.model_validate(data)
             if report_text.test_summary.strip():
                 test_summary = report_text.test_summary.strip()
@@ -125,16 +114,4 @@ def generate_report(*, run_id: str, url: str, execution_result: ExecutionResult,
         page_url_at_failure=execution_result.failure.page_url_at_failure if execution_result.failure else None,
     )
     return report
-
-
-def _get_final_url(*, url: str, execution_result: ExecutionResult) -> str:
-    if execution_result.failed_step and execution_result.failed_step.page_url:
-        return execution_result.failed_step.page_url
-    if execution_result.steps_executed:
-        last_step = execution_result.steps_executed[-1]
-        if last_step.page_url:
-            return last_step.page_url
-    if execution_result.failure and execution_result.failure.page_url_at_failure:
-        return execution_result.failure.page_url_at_failure
-    return url
 

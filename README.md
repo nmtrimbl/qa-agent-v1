@@ -26,14 +26,63 @@ It is intentionally simple and synchronous for reliability.
 8. Streamlit UI shows the report
 9. FastAPI exposes `POST /run-test`
 
+## Final Project Tree
+
+```text
+ai-qa-platform/
+├── __init__.py
+├── api/
+│   ├── __init__.py
+│   └── server.py
+├── agents/
+│   ├── __init__.py
+│   ├── bug_analyzer.py
+│   ├── report_generator.py
+│   └── test_planner.py
+├── artifacts/
+├── browser/
+│   ├── __init__.py
+│   ├── browser_session.py
+│   └── executor.py
+├── config/
+│   ├── __init__.py
+│   └── settings.py
+├── logs/
+├── models/
+│   ├── __init__.py
+│   ├── test_report.py
+│   └── test_step.py
+├── tests/
+│   ├── __init__.py
+│   ├── test_executor_helpers.py
+│   └── test_models.py
+├── ui/
+│   ├── __init__.py
+│   └── streamlit_app.py
+├── utils/
+│   ├── __init__.py
+│   ├── file_helpers.py
+│   ├── json_helpers.py
+│   ├── report_helpers.py
+│   └── runtime.py
+├── workflows/
+│   ├── __init__.py
+│   └── qa_pipeline.py
+├── .env.example
+├── README.md
+├── pytest.ini
+└── requirements.txt
+```
+
 ## Folder Layout
 
-- `agents/`: planner, bug analyzer, report generator
-- `browser/`: Playwright session + deterministic executor
-- `models/`: Pydantic models for steps + reports
+- `agents/`: LLM planner, bug analyzer, and report generator
+- `browser/`: Playwright session and deterministic executor
+- `models/`: Pydantic models for steps and reports
 - `workflows/`: synchronous pipeline glue code
 - `api/`: FastAPI server
 - `ui/`: Streamlit UI
+- `utils/`: shared beginner-friendly helpers for files, JSON parsing, reporting, and runtime setup
 - `artifacts/` and `logs/`: saved test outputs
 
 ## Prerequisites
