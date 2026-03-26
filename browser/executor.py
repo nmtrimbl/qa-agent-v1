@@ -526,7 +526,7 @@ class BrowserExecutor:
             if self._try_click_locator(locator, timeout_ms=min(attempt_timeout_ms, 1200)):
                 return note
 
-        for menu_hint in step.menu_hints:
+        for menu_hint in self._normalize_candidate_labels(step.menu_hints):
             attempt_timeout_ms = self._remaining_timeout_ms(deadline=deadline, minimum_ms=250)
             if attempt_timeout_ms is None:
                 break
@@ -555,7 +555,7 @@ class BrowserExecutor:
         for selector in step.candidate_selectors:
             attempts.append((self._resolve_click_target(page, selector), f"clicked candidate selector {selector}"))
 
-        for label in step.candidate_labels:
+        for label in self._normalize_candidate_labels(step.candidate_labels):
             attempts.extend(self._semantic_locators_for_label(page=page, label=label))
 
         # Remove duplicate notes while preserving order.
@@ -585,21 +585,49 @@ class BrowserExecutor:
 
     def _try_click_locator(self, locator, timeout_ms: int) -> bool:
         try:
-            if locator.count() < 1:
+            match_count = locator.count()
+            if match_count < 1:
                 return False
         except Exception:
             return False
 
-        try:
-            locator.scroll_into_view_if_needed(timeout=timeout_ms)
-        except Exception:
-            pass
+        # Some sites render both hidden and visible copies of the same label
+        # for desktop/mobile navigation. Prefer visible matches before giving up.
+        max_candidates_to_try = min(match_count, 5)
+        visible_candidates = []
+        fallback_candidates = []
 
-        try:
-            locator.click(timeout=timeout_ms)
-            return True
-        except Exception:
-            return False
+        for index in range(max_candidates_to_try):
+            try:
+                candidate = locator.nth(index)
+            except Exception:
+                if index == 0:
+                    candidate = locator
+                else:
+                    break
+
+            try:
+                if candidate.is_visible():
+                    visible_candidates.append(candidate)
+                    continue
+            except Exception:
+                pass
+
+            fallback_candidates.append(candidate)
+
+        for candidate in visible_candidates + fallback_candidates:
+            try:
+                candidate.scroll_into_view_if_needed(timeout=timeout_ms)
+            except Exception:
+                pass
+
+            try:
+                candidate.click(timeout=timeout_ms)
+                return True
+            except Exception:
+                continue
+
+        return False
 
     def _open_menu_hint(self, page: Page, label: str, timeout_ms: int) -> Optional[str]:
         for locator, note in self._semantic_locators_for_label(page=page, label=label):
@@ -613,6 +641,25 @@ class BrowserExecutor:
         if remaining_ms < minimum_ms:
             return None
         return remaining_ms
+
+    @staticmethod
+    def _normalize_candidate_labels(labels: list[str]) -> list[str]:
+        """
+        Trim and normalize whitespace in semantic labels before matching.
+
+        Example:
+        - `"  Sign In\\n"` becomes `"Sign In"`
+        """
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for label in labels:
+            clean = re.sub(r"\s+", " ", label or "").strip()
+            if not clean or clean in seen:
+                continue
+            normalized.append(clean)
+            seen.add(clean)
+        return normalized
 
     def _scroll_intelligently_for_text(self, page: Page, selector: str, expected: str) -> None:
         """

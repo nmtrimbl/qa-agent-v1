@@ -103,6 +103,7 @@ def run_qa_test_pipeline(*, url: str, test_notes: str) -> TestReport:
         url=url,
         execution_result=execution_result,
         bug_analysis=bug_analysis,
+        planned_steps=steps,
         memory_summary=memory_summary,
     )
 

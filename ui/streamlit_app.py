@@ -163,6 +163,14 @@ def _render_screenshots(report: TestReport) -> None:
         _safe_image(path)
 
 
+def _render_developer_details(report: TestReport) -> None:
+    st.subheader("Planner Output JSON")
+    if report.planner_output:
+        st.json(report.planner_output, expanded=2)
+    else:
+        st.write("No planner output was attached to the report.")
+
+
 def _load_memory_for_display(url: str):
     settings = get_settings()
     try:
@@ -322,8 +330,8 @@ def main() -> None:
     else:
         st.error("Test failed.")
 
-    summary_tab, steps_tab, failure_tab, console_tab, screenshots_tab = st.tabs(
-        ["Summary", "Steps", "Failure Details", "Console Errors", "Screenshots"]
+    summary_tab, steps_tab, failure_tab, console_tab, screenshots_tab, developer_tab = st.tabs(
+        ["Summary", "Steps", "Failure Details", "Console Errors", "Screenshots", "Developer"]
     )
 
     with summary_tab:
@@ -340,6 +348,9 @@ def main() -> None:
 
     with screenshots_tab:
         _render_screenshots(report)
+
+    with developer_tab:
+        _render_developer_details(report)
 
     _render_feedback_form(stored_url, report)
 

@@ -30,6 +30,12 @@ def test_footer_detection_uses_expected_text_and_selector():
     assert executor._looks_like_footer_check(selector="main h1", expected="Welcome") is False
 
 
+def test_normalize_candidate_labels_trims_and_deduplicates_whitespace():
+    labels = ["  Sign In\n", "Sign   In", "", "   "]
+    normalized = BrowserExecutor._normalize_candidate_labels(labels)
+    assert normalized == ["Sign In"]
+
+
 class FakePage:
     def __init__(self):
         self.evaluate_calls = []
@@ -75,18 +81,54 @@ class FakePage:
 
 
 class FakeLocator:
+    def __init__(self, *, visible=True, click_raises=False, children=None):
+        self._visible = visible
+        self._click_raises = click_raises
+        self._children = children
+        self.click_calls = 0
+        self.scroll_calls = 0
+
     @property
     def first(self):
         return self
 
     def count(self):
+        if self._children is not None:
+            return len(self._children)
         return 0
 
     def is_visible(self):
+        return self._visible
+
+    def nth(self, index):
+        if self._children is None:
+            if index == 0:
+                return self
+            raise IndexError(index)
+        return self._children[index]
+
+    def scroll_into_view_if_needed(self, timeout):
+        self.scroll_calls += 1
         return False
 
     def click(self, timeout):
+        self.click_calls += 1
+        if self._click_raises:
+            raise RuntimeError("click failed")
         return None
+
+
+def test_try_click_locator_prefers_visible_match_when_first_is_hidden():
+    executor = BrowserExecutor(artifacts_dir="artifacts")
+    hidden = FakeLocator(visible=False, click_raises=True)
+    visible = FakeLocator(visible=True)
+    locator = FakeLocator(children=[hidden, visible])
+
+    clicked = executor._try_click_locator(locator, timeout_ms=500)
+
+    assert clicked is True
+    assert hidden.click_calls == 0
+    assert visible.click_calls == 1
 
 
 def test_capture_full_page_screenshot_scrolls_and_restores_position(tmp_path):

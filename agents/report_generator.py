@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from agents.bug_analyzer import BugAnalysis
 from browser.executor import ExecutionResult
 from config.settings import get_settings
+from models.test_step import TestStep
 from models.test_report import TestReport
 from utils.json_helpers import extract_json_object
 from utils.report_helpers import get_final_url
@@ -24,6 +25,7 @@ def generate_report(
     url: str,
     execution_result: ExecutionResult,
     bug_analysis: BugAnalysis,
+    planned_steps: list[TestStep] | None = None,
     memory_summary: dict[str, object] | None = None,
 ) -> TestReport:
     """
@@ -119,6 +121,7 @@ def generate_report(
         console_errors=execution_result.console_errors,
         screenshot_paths=execution_result.screenshot_paths,
         page_url_at_failure=execution_result.failure.page_url_at_failure if execution_result.failure else None,
+        planner_output=[step.model_dump(mode="json") for step in (planned_steps or [])],
         memory_consulted=bool((memory_summary or {}).get("memory_consulted", False)),
         memory_domain=(memory_summary or {}).get("memory_domain"),
         domain_hint_ids_consulted=list((memory_summary or {}).get("domain_hint_ids_consulted", [])),

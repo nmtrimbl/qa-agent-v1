@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Any
 from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
@@ -74,4 +75,5 @@ class TestReport(BaseModel):
     console_errors: list[ConsoleError] = Field(default_factory=list)
     screenshot_paths: list[str] = Field(default_factory=list)
     page_url_at_failure: Optional[str] = None
+    planner_output: list[dict[str, Any]] = Field(default_factory=list)
 

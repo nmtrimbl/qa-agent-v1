@@ -82,6 +82,7 @@ def test_report_can_include_failed_step_details():
         domain_hint_ids_consulted=["domain:example.com:login"],
         global_hint_ids_consulted=["global:login"],
         fallback_paths_used=["opened menu hint Account via clicked partial text candidate Account"],
+        planner_output=[{"action": "goto", "url": "https://example.com"}],
         failed_step=FailedStepDetails(
             step_index=1,
             step=step,
@@ -97,6 +98,7 @@ def test_report_can_include_failed_step_details():
     assert report.test_summary == "The login check failed."
     assert report.severity_guess == "medium"
     assert report.memory_consulted is True
+    assert report.planner_output == [{"action": "goto", "url": "https://example.com"}]
     assert report.failed_step.step_index == 1
     assert report.failed_step.error_message == "Button not found"
 
