@@ -121,3 +121,20 @@ def test_execute_always_adds_final_report_screenshot(tmp_path):
 
     assert result.success is True
     assert any(path.endswith("final_report_full_page.png") for path in result.screenshot_paths)
+
+
+def test_goto_uses_more_tolerant_navigation_defaults(tmp_path):
+    executor = BrowserExecutor(artifacts_dir=tmp_path)
+    page = FakePage()
+
+    result = executor._execute_single_step(
+        page=page,
+        step=TestStep(action=StepAction.goto, url="https://example.com"),
+        screenshots_dir=tmp_path,
+        screenshot_paths=[],
+    )
+
+    assert result.screenshot_path is None
+    assert page.goto_calls == [
+        {"url": "https://example.com", "wait_until": "domcontentloaded", "timeout": 15000}
+    ]

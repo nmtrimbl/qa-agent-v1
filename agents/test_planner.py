@@ -7,6 +7,7 @@ from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from config.settings import get_settings
+from models.site_memory import PlannerMemoryView
 from models.test_step import StepAction, TestStep
 from utils.json_helpers import strip_markdown_code_fences
 
@@ -48,9 +49,10 @@ def _canonicalize_steps(url: str, steps: list[TestStep]) -> list[TestStep]:
 
     # Ensure first step is `goto` for the provided URL.
     if not steps or steps[0].action != StepAction.goto:
-        steps.insert(0, TestStep(action=StepAction.goto, url=url))
+        steps.insert(0, TestStep(action=StepAction.goto, url=url, timeout_ms=15000))
     else:
-        steps[0] = TestStep(action=StepAction.goto, url=url)
+        timeout_ms = max(steps[0].timeout_ms, 15000)
+        steps[0] = TestStep(action=StepAction.goto, url=url, timeout_ms=timeout_ms)
 
     # Ensure at least one screenshot exists; append if missing.
     if not any(s.action == StepAction.screenshot for s in steps):
@@ -59,7 +61,13 @@ def _canonicalize_steps(url: str, steps: list[TestStep]) -> list[TestStep]:
     return steps
 
 
-def plan_test_steps(url: str, test_notes: str) -> list[TestStep]:
+def plan_test_steps(
+    url: str,
+    test_notes: str,
+    *,
+    domain_memory: Optional[PlannerMemoryView] = None,
+    global_memory: Optional[PlannerMemoryView] = None,
+) -> list[TestStep]:
     """
     LLM-planning agent.
 
@@ -104,21 +112,37 @@ def plan_test_steps(url: str, test_notes: str) -> list[TestStep]:
             )
             return resp.choices[0].message.content or ""
 
+    domain_memory = domain_memory or PlannerMemoryView(domain="unknown", scope="domain")
+    global_memory = global_memory or PlannerMemoryView(domain="_global", scope="global")
+
     # First prompt: ask for strict JSON shape.
     system_prompt = (
         "You are a QA test planner.\n"
         "Convert the user's manual QA notes into deterministic browser test steps.\n"
+        "Interpret instructions by user intent, not only by literal visible text.\n"
+        "If the notes say something like 'click login', you may use semantic hints\n"
+        "such as account icons, sign-in labels, or opening a menu first.\n"
+        "Memory is advisory, not guaranteed truth. Prefer domain memory before\n"
+        "global memory, but always keep fallbacks soft and deterministic.\n"
         "Return ONLY valid JSON with this top-level shape:\n"
         '{ "steps": [ ... ] }\n'
         "Each step object must match the Pydantic `TestStep` schema exactly "
         "(no unknown keys). You may omit fields with defaults.\n"
         "Mandatory fields per action:\n"
         "- goto: must include `url`\n"
-        "- click: must include `selector`\n"
+        "- click: must include `selector`, or semantic fields like `candidate_labels` or `candidate_selectors`\n"
         "- fill: must include `selector` and `text`\n"
         "- press: must include `key` (optional: `selector`)\n"
-        "- assert_text: must include `selector` and `expected_text`\n"
+        "- assert_text: must include `expected_text`, plus `selector` or semantic fallback candidates\n"
         "- screenshot: optional `screenshot_name`, optional `full_page`\n"
+        "Optional semantic fields:\n"
+        "- intent: short summary like `login`, `open_navigation`, `account_access`\n"
+        "- candidate_labels: alternate UI text such as `Login`, `Sign In`, `Account`\n"
+        "- candidate_selectors: alternate selectors or aria/title selectors\n"
+        "- menu_hints: labels that may need to be opened before the main target is clickable\n"
+        "- fallback_actions: short notes about fallback strategy\n"
+        "- memory_hint_ids: IDs of memory hints that influenced this step\n"
+        "- optional: true only if failing the step should not stop the main intent flow\n"
         "Supported actions: " + ", ".join(sorted(SUPPORTED_ACTIONS)) + ".\n"
         "No markdown. No extra keys."
     )
@@ -127,13 +151,20 @@ def plan_test_steps(url: str, test_notes: str) -> list[TestStep]:
         f"URL: {url}\n\n"
         "Manual QA test notes:\n"
         f"{test_notes}\n\n"
+        "Domain memory hints:\n"
+        f"{json.dumps(_serialize_memory_view(domain_memory), ensure_ascii=False)}\n\n"
+        "Global memory hints:\n"
+        f"{json.dumps(_serialize_memory_view(global_memory), ensure_ascii=False)}\n\n"
         "Rules:\n"
         "1) Output must be exactly the JSON schema. No explanations.\n"
         "2) The first step should be action `goto` with the same URL.\n"
-        "3) Prefer `selector` using CSS selectors, or `text=Visible text` for click/assert_text.\n"
-        "4) For `fill`, use CSS selectors only.\n"
-        "5) Include at least one `screenshot` step near the end.\n"
-        "6) Max 20 steps."
+        "3) Prefer flexible semantic steps for ambiguous instructions. Use exact selectors only when they are obvious.\n"
+        "4) For click/assert_text, include multiple candidate labels when wording may vary.\n"
+        "5) If a menu or account icon might need to open first, add `menu_hints` or an intermediate click step.\n"
+        "6) Use `memory_hint_ids` only for relevant hints. Do not copy every hint into every step.\n"
+        "7) For `fill`, use CSS selectors only.\n"
+        "8) Include at least one `screenshot` step near the end.\n"
+        "9) Max 20 steps."
     )
 
     # Retry logic (only once) for invalid JSON or schema mismatch.
@@ -190,4 +221,13 @@ def plan_test_steps(url: str, test_notes: str) -> list[TestStep]:
 
     # Unreachable due to raise above, but keeps type-checkers happy.
     raise RuntimeError("Planner failed unexpectedly.")
+
+
+def _serialize_memory_view(memory: PlannerMemoryView) -> dict[str, Any]:
+    return {
+        "domain": memory.domain,
+        "scope": memory.scope,
+        "top_hints": [hint.model_dump(mode="json") for hint in memory.top_hints],
+        "recent_feedback": [entry.model_dump(mode="json") for entry in memory.recent_feedback],
+    }
 

@@ -18,7 +18,14 @@ class ReportText(BaseModel):
     failure_summary: str = Field(default="")
 
 
-def generate_report(*, run_id: str, url: str, execution_result: ExecutionResult, bug_analysis: BugAnalysis) -> TestReport:
+def generate_report(
+    *,
+    run_id: str,
+    url: str,
+    execution_result: ExecutionResult,
+    bug_analysis: BugAnalysis,
+    memory_summary: dict[str, object] | None = None,
+) -> TestReport:
     """
     LLM-based report agent.
 
@@ -112,6 +119,11 @@ def generate_report(*, run_id: str, url: str, execution_result: ExecutionResult,
         console_errors=execution_result.console_errors,
         screenshot_paths=execution_result.screenshot_paths,
         page_url_at_failure=execution_result.failure.page_url_at_failure if execution_result.failure else None,
+        memory_consulted=bool((memory_summary or {}).get("memory_consulted", False)),
+        memory_domain=(memory_summary or {}).get("memory_domain"),
+        domain_hint_ids_consulted=list((memory_summary or {}).get("domain_hint_ids_consulted", [])),
+        global_hint_ids_consulted=list((memory_summary or {}).get("global_hint_ids_consulted", [])),
+        fallback_paths_used=list((memory_summary or {}).get("fallback_paths_used", [])),
     )
     return report
 

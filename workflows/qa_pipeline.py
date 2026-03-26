@@ -13,6 +13,7 @@ from config.settings import get_settings
 from models.test_report import TestReport
 from utils.file_helpers import ensure_dir, new_run_id, write_json
 from utils.runtime import ensure_runtime_directories
+from utils.site_memory import build_planner_memory_views, memory_summary_for_report, update_memory_strength_from_steps
 
 
 def run_qa_test_pipeline(*, url: str, test_notes: str) -> TestReport:
@@ -49,13 +50,29 @@ def run_qa_test_pipeline(*, url: str, test_notes: str) -> TestReport:
         logger.addHandler(stream_handler)
 
     logger.info("Planning steps with LLM...")
-    steps = plan_test_steps(url=url, test_notes=test_notes)
+    domain_memory_view, global_memory_view = build_planner_memory_views(
+        url=url,
+        artifacts_dir=settings.artifacts_dir,
+    )
+    steps = plan_test_steps(
+        url=url,
+        test_notes=test_notes,
+        domain_memory=domain_memory_view,
+        global_memory=global_memory_view,
+    )
     write_json(run_artifacts_dir / "planned_steps.json", [s.model_dump(mode="json") for s in steps])
 
     logger.info("Executing steps in Playwright...")
     with BrowserSession(headless=settings.playwright_headless, artifacts_dir=run_artifacts_dir, run_id=run_id) as session:
         executor = BrowserExecutor(artifacts_dir=run_artifacts_dir)
         execution_result = executor.execute(session=session, url=url, steps=steps, run_id=run_id)
+
+    logger.info("Updating feedback-assisted memory scores...")
+    update_memory_strength_from_steps(
+        url=url,
+        executed_steps=execution_result.steps_executed,
+        artifacts_dir=settings.artifacts_dir,
+    )
 
     logger.info("Generating failure analysis...")
     if execution_result.success:
@@ -76,11 +93,17 @@ def run_qa_test_pipeline(*, url: str, test_notes: str) -> TestReport:
         )
 
     logger.info("Generating report...")
+    memory_summary = memory_summary_for_report(
+        url=url,
+        executed_steps=execution_result.steps_executed,
+        artifacts_dir=settings.artifacts_dir,
+    )
     report = generate_report(
         run_id=run_id,
         url=url,
         execution_result=execution_result,
         bug_analysis=bug_analysis,
+        memory_summary=memory_summary,
     )
 
     # Save final report.

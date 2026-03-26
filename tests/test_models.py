@@ -23,6 +23,17 @@ def test_click_requires_selector():
         TestStep(action=StepAction.click, selector=None)
 
 
+def test_click_allows_semantic_candidates_without_exact_selector():
+    step = TestStep(
+        action=StepAction.click,
+        intent="login",
+        candidate_labels=["Login", "Sign In", "Account"],
+        menu_hints=["Account"],
+    )
+    assert step.intent == "login"
+    assert "Sign In" in step.candidate_labels
+
+
 def test_fill_requires_text():
     with pytest.raises(ValidationError):
         TestStep(action=StepAction.fill, selector="input[name='q']", text=None)
@@ -46,10 +57,13 @@ def test_step_execution_supports_page_url_and_screenshot_path():
         status="ok",
         page_url="https://example.com",
         screenshot_path="/tmp/example.png",
+        resolution_notes=["clicked button role by label Sign In"],
+        memory_hint_ids_used=["global:login_account_icon"],
     )
     assert execution.step_index == 0
     assert execution.page_url == "https://example.com"
     assert execution.screenshot_path == "/tmp/example.png"
+    assert execution.memory_hint_ids_used == ["global:login_account_icon"]
 
 
 def test_report_can_include_failed_step_details():
@@ -63,18 +77,26 @@ def test_report_can_include_failed_step_details():
         likely_failure_cause="The login button was not found.",
         reproduction_notes="Open the login page and try the Login button again.",
         severity_guess="medium",
+        memory_consulted=True,
+        memory_domain="example.com",
+        domain_hint_ids_consulted=["domain:example.com:login"],
+        global_hint_ids_consulted=["global:login"],
+        fallback_paths_used=["opened menu hint Account via clicked partial text candidate Account"],
         failed_step=FailedStepDetails(
             step_index=1,
             step=step,
             error_message="Button not found",
             page_url="https://example.com/login",
             screenshot_path="/tmp/failure.png",
+            resolution_notes=["opened menu hint Account via clicked partial text candidate Account"],
+            memory_hint_ids_used=["global:login"],
         ),
     )
     assert report.failed_step is not None
     assert report.final_url == "https://example.com/login"
     assert report.test_summary == "The login check failed."
     assert report.severity_guess == "medium"
+    assert report.memory_consulted is True
     assert report.failed_step.step_index == 1
     assert report.failed_step.error_message == "Button not found"
 

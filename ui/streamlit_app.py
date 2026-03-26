@@ -17,6 +17,7 @@ import streamlit as st
 
 from config.settings import get_settings
 from models.test_report import TestReport
+from utils.site_memory import build_planner_memory_views, normalize_domain, record_feedback
 
 
 def _safe_image(path: str):
@@ -54,6 +55,23 @@ def _render_summary(report: TestReport) -> None:
     if report.final_url:
         st.caption(f"Final URL: {report.final_url}")
 
+    if report.memory_consulted:
+        st.subheader("Memory Usage")
+        if report.memory_domain:
+            st.write(f"Domain memory: `{report.memory_domain}`")
+        if report.domain_hint_ids_consulted:
+            st.write("Domain hints consulted:")
+            for hint_id in report.domain_hint_ids_consulted:
+                st.write(f"- `{hint_id}`")
+        if report.global_hint_ids_consulted:
+            st.write("Global hints consulted:")
+            for hint_id in report.global_hint_ids_consulted:
+                st.write(f"- `{hint_id}`")
+        if report.fallback_paths_used:
+            st.write("Fallback paths used:")
+            for path in report.fallback_paths_used:
+                st.write(f"- {path}")
+
 
 def _render_steps(report: TestReport) -> None:
     st.subheader("Executed Steps")
@@ -67,6 +85,7 @@ def _render_steps(report: TestReport) -> None:
                 "Selector": step_exec.step.selector or "",
                 "Expected Text": step_exec.step.expected_text or "",
                 "Page URL": step_exec.page_url or "",
+                "Fallback Notes": " | ".join(step_exec.resolution_notes),
             }
         )
 
@@ -79,6 +98,10 @@ def _render_steps(report: TestReport) -> None:
         if step_exec.error_message:
             with st.expander(f"Step {step_exec.step_index + 1} error details"):
                 st.code(step_exec.error_message)
+                if step_exec.resolution_notes:
+                    st.write("Fallback notes:")
+                    for note in step_exec.resolution_notes:
+                        st.write(f"- {note}")
                 if step_exec.screenshot_path:
                     _safe_image(step_exec.screenshot_path)
 
@@ -98,6 +121,14 @@ def _render_failure_details(report: TestReport) -> None:
         st.write(f"Expected text: `{failed_step.step.expected_text}`")
     if failed_step.page_url:
         st.write(f"Page URL: {failed_step.page_url}")
+    if failed_step.memory_hint_ids_used:
+        st.write("Memory hints tied to the failed step:")
+        for hint_id in failed_step.memory_hint_ids_used:
+            st.write(f"- `{hint_id}`")
+    if failed_step.resolution_notes:
+        st.write("Fallback notes:")
+        for note in failed_step.resolution_notes:
+            st.write(f"- {note}")
     st.code(failed_step.error_message)
     if failed_step.screenshot_path:
         _safe_image(failed_step.screenshot_path)
@@ -132,6 +163,112 @@ def _render_screenshots(report: TestReport) -> None:
         _safe_image(path)
 
 
+def _load_memory_for_display(url: str):
+    settings = get_settings()
+    try:
+        return build_planner_memory_views(url=url, artifacts_dir=settings.artifacts_dir)
+    except Exception:
+        return None, None
+
+
+def _render_memory_hints(url: str) -> None:
+    if not url.strip():
+        return
+
+    domain_memory, global_memory = _load_memory_for_display(url)
+    if domain_memory is None or global_memory is None:
+        return
+
+    with st.expander("Feedback-Assisted Memory", expanded=False):
+        st.write(
+            "These are soft hints learned from previous feedback and successful runs. "
+            "They guide planning and fallbacks, but they are not treated as hard rules."
+        )
+        st.caption(f"Domain: {normalize_domain(url)}")
+
+        st.markdown("**Previous site feedback**")
+        if domain_memory.recent_feedback:
+            for entry in reversed(domain_memory.recent_feedback):
+                st.write(f"- Issue: {entry.issue}")
+                st.write(f"  Correction: {entry.correction}")
+        else:
+            st.write("No saved feedback for this site yet.")
+
+        st.markdown("**Global soft hints**")
+        if global_memory.top_hints:
+            for hint in global_memory.top_hints:
+                st.write(
+                    f"- `{hint.intent or 'general'}` via {hint.kind}: "
+                    + ", ".join(hint.candidates[:4])
+                )
+        else:
+            st.write("No shared cross-site hints yet.")
+
+
+def _save_feedback(
+    *,
+    url: str,
+    report: TestReport,
+    issue: str,
+    correction: str,
+    intent: str,
+) -> None:
+    settings = get_settings()
+    payload = {
+        "url": url,
+        "run_id": report.run_id,
+        "issue": issue,
+        "correction": correction,
+        "intent": intent,
+        "failed_step": report.failed_step.model_dump(mode="json") if report.failed_step else None,
+    }
+
+    feedback_url = settings.fastapi_url.rsplit("/", 1)[0] + "/feedback"
+    try:
+        response = requests.post(feedback_url, json=payload, timeout=30)
+        response.raise_for_status()
+    except Exception:
+        record_feedback(
+            url=url,
+            run_id=report.run_id,
+            issue=issue,
+            correction=correction,
+            intent=intent,
+            failed_step=payload["failed_step"],
+            artifacts_dir=settings.artifacts_dir,
+        )
+
+
+def _render_feedback_form(url: str, report: TestReport) -> None:
+    st.subheader("Submit Feedback")
+    st.write(
+        "Help the system improve for future runs. Feedback is stored as a hint, "
+        "not as a hard rule, so later runs can strengthen or weaken it."
+    )
+    issue = st.text_area(
+        "What went wrong?",
+        key="feedback_issue",
+        placeholder="Example: The system only looked for 'Login' text.",
+    )
+    correction = st.text_area(
+        "What should it do instead?",
+        key="feedback_correction",
+        placeholder="Example: Open the account icon first, then click Sign In.",
+    )
+    intent = st.text_input(
+        "Intent (optional)",
+        key="feedback_intent",
+        placeholder="Example: login",
+    )
+
+    if st.button("Submit Feedback", key="submit_feedback"):
+        if not issue.strip() or not correction.strip():
+            st.error("Please fill in both feedback fields.")
+            return
+        _save_feedback(url=url, report=report, issue=issue, correction=correction, intent=intent)
+        st.success("Feedback saved. It will be used as a soft hint in future runs.")
+
+
 def main() -> None:
     st.set_page_config(page_title="AI QA Testing Platform", layout="wide")
 
@@ -142,33 +279,43 @@ def main() -> None:
     url = st.text_input("Website URL", placeholder="https://example.com")
     test_notes = st.text_area("Manual QA test notes", height=200, placeholder="Example:\n- Go to login page\n- Click login button\n- Verify error message appears")
 
+    _render_memory_hints(url)
+
     run_clicked = st.button("Run Test", type="primary")
 
-    if not run_clicked:
+    if run_clicked:
+        if not url.strip():
+            st.error("Please enter a URL.")
+            return
+
+        if not test_notes.strip():
+            st.error("Please paste your manual QA test notes.")
+            return
+
+        st.info("Running test. This may take a minute...")
+        with st.spinner("Planning, running Playwright, and generating report..."):
+            report: TestReport
+            payload = {"url": url, "test_notes": test_notes}
+
+            # Prefer calling the FastAPI server (as requested), but fall back to local execution.
+            try:
+                resp = requests.post(settings.fastapi_url, json=payload, timeout=600)
+                resp.raise_for_status()
+                report = TestReport.model_validate(resp.json())
+            except Exception:
+                from workflows.qa_pipeline import run_qa_test_pipeline
+
+                report = run_qa_test_pipeline(url=url, test_notes=test_notes)
+
+        st.session_state["last_report"] = report.model_dump(mode="json")
+        st.session_state["last_url"] = url
+
+    stored_report = st.session_state.get("last_report")
+    stored_url = st.session_state.get("last_url", url)
+    if not stored_report:
         return
 
-    if not url.strip():
-        st.error("Please enter a URL.")
-        return
-
-    if not test_notes.strip():
-        st.error("Please paste your manual QA test notes.")
-        return
-
-    st.info("Running test. This may take a minute...")
-    with st.spinner("Planning, running Playwright, and generating report..."):
-        report: TestReport
-        payload = {"url": url, "test_notes": test_notes}
-
-        # Prefer calling the FastAPI server (as requested), but fall back to local execution.
-        try:
-            resp = requests.post(settings.fastapi_url, json=payload, timeout=600)
-            resp.raise_for_status()
-            report = TestReport.model_validate(resp.json())
-        except Exception:
-            from workflows.qa_pipeline import run_qa_test_pipeline
-
-            report = run_qa_test_pipeline(url=url, test_notes=test_notes)
+    report = TestReport.model_validate(stored_report)
 
     if report.overall_status == "PASS":
         st.success("Test passed.")
@@ -193,6 +340,8 @@ def main() -> None:
 
     with screenshots_tab:
         _render_screenshots(report)
+
+    _render_feedback_form(stored_url, report)
 
 
 if __name__ == "__main__":

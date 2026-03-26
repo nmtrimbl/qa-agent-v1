@@ -36,6 +36,12 @@ class ExecutionResult(BaseModel):
     screenshot_paths: list[str] = []
 
 
+class StepRunInfo(BaseModel):
+    screenshot_path: Optional[str] = None
+    resolution_notes: list[str] = []
+    memory_hint_ids_used: list[str] = []
+
+
 class BrowserExecutor:
     """
     Executes planned `TestStep`s deterministically using Playwright.
@@ -78,6 +84,7 @@ class BrowserExecutor:
         ".modal-popup._show",
     )
     MAX_VIEWPORT_CAPTURE_HEIGHT = 12000
+    MIN_NAVIGATION_TIMEOUT_MS = 15000
 
     def execute(
         self,
@@ -101,7 +108,7 @@ class BrowserExecutor:
 
         for step_index, step in enumerate(steps):
             try:
-                step_screenshot_path = self._execute_single_step(
+                step_run_info = self._execute_single_step(
                     page=page,
                     step=step,
                     screenshots_dir=screenshots_dir,
@@ -113,7 +120,9 @@ class BrowserExecutor:
                         step=step,
                         status="ok",
                         page_url=page.url,
-                        screenshot_path=step_screenshot_path,
+                        screenshot_path=step_run_info.screenshot_path,
+                        resolution_notes=step_run_info.resolution_notes,
+                        memory_hint_ids_used=step_run_info.memory_hint_ids_used,
                     )
                 )
             except Exception as e:
@@ -146,6 +155,7 @@ class BrowserExecutor:
                         page_url=page.url,
                         screenshot_path=failure_screenshot_str,
                         error_message=str(e),
+                        memory_hint_ids_used=list(step.memory_hint_ids),
                     )
                 )
                 failed_step_details = FailedStepDetails(
@@ -154,6 +164,7 @@ class BrowserExecutor:
                     error_message=str(e),
                     page_url=page.url,
                     screenshot_path=failure_screenshot_str,
+                    memory_hint_ids_used=list(step.memory_hint_ids),
                 )
 
                 # Requirement: stop on failure to keep results clear for beginner MVP.
@@ -162,16 +173,17 @@ class BrowserExecutor:
         # Console errors captured during the run.
         console_errors = session.console_errors
 
-        # Always attach one final full-page screenshot for the report so the
-        # user can inspect the full end state of the page, regardless of where
-        # the planner inserted screenshot steps.
-        final_report_screenshot = screenshots_dir / "final_report_full_page.png"
-        try:
-            self._capture_full_page_screenshot(page, final_report_screenshot)
-            screenshot_paths.append(str(final_report_screenshot))
-        except Exception:
-            # The run result is still useful even if the final report screenshot fails.
-            pass
+        # On success, attach one final full-page screenshot for the report.
+        # On failure we already capture a dedicated failure screenshot, so we
+        # skip a second end-of-run full-page capture to avoid long delays.
+        if failure_info is None:
+            final_report_screenshot = screenshots_dir / "final_report_full_page.png"
+            try:
+                self._capture_full_page_screenshot(page, final_report_screenshot)
+                screenshot_paths.append(str(final_report_screenshot))
+            except Exception:
+                # The run result is still useful even if the final report screenshot fails.
+                pass
 
         result = ExecutionResult(
             success=failure_info is None,
@@ -192,25 +204,32 @@ class BrowserExecutor:
         step: TestStep,
         screenshots_dir: Path,
         screenshot_paths: list[str],
-    ) -> Optional[str]:
+    ) -> StepRunInfo:
         """
         Execute one validated test step.
 
         Returns:
         - screenshot path for `screenshot` steps
-        - None for other step types
+        - resolution notes describing which deterministic fallback worked
         """
 
+        result = StepRunInfo(memory_hint_ids_used=list(step.memory_hint_ids))
+
         if step.action == StepAction.goto:
-            page.goto(step.url, wait_until="load", timeout=step.timeout_ms)
-            self._wait_after_page_change(page, timeout_ms=step.timeout_ms)
-            return None
+            navigation_timeout_ms = max(step.timeout_ms, self.MIN_NAVIGATION_TIMEOUT_MS)
+            # `domcontentloaded` is a safer first navigation gate for slower
+            # staging sites. The settle helper below still waits for extra page
+            # readiness signals after the initial response arrives.
+            page.goto(step.url, wait_until="domcontentloaded", timeout=navigation_timeout_ms)
+            self._wait_after_page_change(page, timeout_ms=navigation_timeout_ms)
+            return result
 
         if step.action == StepAction.click:
-            locator = self._resolve_click_target(page, step.selector)
-            locator.click(timeout=step.timeout_ms)
+            click_note = self._click_with_fallbacks(page=page, step=step)
+            if click_note:
+                result.resolution_notes.append(click_note)
             self._wait_after_page_change(page, timeout_ms=step.timeout_ms)
-            return None
+            return result
 
         if step.action == StepAction.fill:
             if step.selector and step.selector.startswith("text="):
@@ -219,22 +238,22 @@ class BrowserExecutor:
                 raise ValueError("fill requires `selector`.")
             page.locator(step.selector).fill(step.text or "", timeout=step.timeout_ms)
             page.wait_for_timeout(150)
-            return None
+            return result
 
         if step.action == StepAction.press:
             # Focus is optional. If a selector is given, click it first.
             if step.selector:
-                locator = self._resolve_click_target(page, step.selector)
-                locator.click(timeout=step.timeout_ms)
+                click_note = self._click_with_fallbacks(page=page, step=step)
+                if click_note:
+                    result.resolution_notes.append(click_note)
             page.keyboard.press(step.key, timeout=step.timeout_ms)
             self._wait_after_page_change(page, timeout_ms=step.timeout_ms)
-            return None
+            return result
 
         if step.action == StepAction.assert_text:
-            if not step.selector:
-                raise ValueError("assert_text requires `selector`.")
-            self._assert_text(page=page, step=step)
-            return None
+            resolution_notes = self._assert_text(page=page, step=step)
+            result.resolution_notes.extend(resolution_notes)
+            return result
 
         if step.action == StepAction.screenshot:
             name = step.screenshot_name or "step_screenshot"
@@ -242,9 +261,9 @@ class BrowserExecutor:
             # Always store a full-page screenshot so reports include footer/content
             # below the initial viewport.
             self._capture_full_page_screenshot(page, file_path)
-            screenshot_path = str(file_path)
-            screenshot_paths.append(screenshot_path)
-            return screenshot_path
+            result.screenshot_path = str(file_path)
+            screenshot_paths.append(result.screenshot_path)
+            return result
 
         raise ValueError(f"Unknown action: {step.action}")
 
@@ -322,13 +341,10 @@ class BrowserExecutor:
         if not selector:
             raise ValueError("click requires `selector`.")
 
-        # Support a beginner-friendly selector style:
-        #   "text=Login" -> click the element that has visible text "Login" (exact match).
         if selector.startswith("text="):
             text_value = selector[len("text=") :]
-            return page.get_by_text(text_value, exact=True).first
+            return page.get_by_text(text_value, exact=False).first
 
-        # Otherwise treat selector as a CSS selector.
         return page.locator(selector).first
 
     def _get_assert_text(self, page: Page, selector: str, timeout_ms: int) -> str:
@@ -341,7 +357,7 @@ class BrowserExecutor:
 
         return locator.inner_text(timeout=timeout_ms).strip()
 
-    def _assert_text(self, page: Page, step: TestStep) -> None:
+    def _assert_text(self, page: Page, step: TestStep) -> list[str]:
         """
         Assert text using a few simple layers:
         1) direct locator lookup
@@ -356,7 +372,7 @@ class BrowserExecutor:
 
         deadline = time.monotonic() + (step.timeout_ms / 1000.0)
         last_locator_text: Optional[str] = None
-        attempt = 0
+        resolution_notes: list[str] = []
 
         # Retry across the timeout window because some homepage sections mount
         # after hydration, carousel init, or scrolling into view.
@@ -372,27 +388,31 @@ class BrowserExecutor:
                 expected=expected,
                 mode=mode,
             ):
-                return
+                resolution_notes.append("assert_text matched direct locator")
+                return resolution_notes
 
             if self._find_expected_text_with_playwright(
                 page=page,
                 expected=expected,
                 mode=mode,
                 timeout_ms=min(remaining_ms, 1200),
+                candidate_labels=step.candidate_labels,
             ):
-                return
+                resolution_notes.append("assert_text matched Playwright text fallback")
+                return resolution_notes
 
             if self._find_text_anywhere_on_page(
                 page,
                 expected=expected,
                 mode=mode,
                 timeout_ms=min(remaining_ms, 1200),
+                candidate_selectors=step.candidate_selectors,
             ):
-                return
+                resolution_notes.append("assert_text matched full-page fallback")
+                return resolution_notes
 
             self._scroll_intelligently_for_text(page, selector=selector, expected=expected)
             page.wait_for_timeout(250)
-            attempt += 1
 
         actual_preview = last_locator_text if last_locator_text is not None else "<locator text not found>"
         raise AssertionError(
@@ -406,7 +426,14 @@ class BrowserExecutor:
         except Exception:
             return None
 
-    def _find_text_anywhere_on_page(self, page: Page, expected: str, mode: str, timeout_ms: int) -> bool:
+    def _find_text_anywhere_on_page(
+        self,
+        page: Page,
+        expected: str,
+        mode: str,
+        timeout_ms: int,
+        candidate_selectors: Optional[list[str]] = None,
+    ) -> bool:
         """
         Search text beyond the initial viewport.
 
@@ -425,9 +452,21 @@ class BrowserExecutor:
             if footer_text:
                 text_candidates.append(footer_text)
 
+        for selector in candidate_selectors or []:
+            candidate_text = self._safe_inner_text(page.locator(selector).first, timeout_ms=timeout_ms)
+            if candidate_text:
+                text_candidates.append(candidate_text)
+
         return any(self._text_matches(actual=text, expected=expected, mode=mode) for text in text_candidates)
 
-    def _find_expected_text_with_playwright(self, page: Page, expected: str, mode: str, timeout_ms: int) -> bool:
+    def _find_expected_text_with_playwright(
+        self,
+        page: Page,
+        expected: str,
+        mode: str,
+        timeout_ms: int,
+        candidate_labels: Optional[list[str]] = None,
+    ) -> bool:
         """
         Ask Playwright to find the expected text directly.
 
@@ -436,8 +475,116 @@ class BrowserExecutor:
         that is already present in the DOM.
         """
 
+        labels_to_try = [expected] + [label for label in (candidate_labels or []) if label != expected]
+        for label in labels_to_try:
+            try:
+                locator = page.get_by_text(label, exact=False).first
+                if locator.count() < 1:
+                    continue
+            except Exception:
+                continue
+
+            try:
+                locator.scroll_into_view_if_needed(timeout=timeout_ms)
+            except Exception:
+                pass
+
+            try:
+                actual = locator.inner_text(timeout=timeout_ms).strip()
+                if actual and self._text_matches(actual=actual, expected=expected, mode=mode):
+                    return True
+            except Exception:
+                pass
+
+            try:
+                text_content = locator.text_content(timeout=timeout_ms)
+            except Exception:
+                text_content = None
+
+            if text_content and self._text_matches(actual=text_content, expected=expected, mode=mode):
+                return True
+
+        return False
+
+    def _click_with_fallbacks(self, page: Page, step: TestStep) -> Optional[str]:
+        """
+        Deterministic click resolution.
+
+        The order is fixed so the behavior stays explainable:
+        1) explicit selector
+        2) candidate selectors
+        3) semantic label strategies
+        4) optional menu hints, then retry
+        """
+
+        deadline = time.monotonic() + (step.timeout_ms / 1000.0)
+        attempts = self._build_click_attempts(page=page, step=step)
+        for locator, note in attempts:
+            attempt_timeout_ms = self._remaining_timeout_ms(deadline=deadline, minimum_ms=250)
+            if attempt_timeout_ms is None:
+                break
+            if self._try_click_locator(locator, timeout_ms=min(attempt_timeout_ms, 1200)):
+                return note
+
+        for menu_hint in step.menu_hints:
+            attempt_timeout_ms = self._remaining_timeout_ms(deadline=deadline, minimum_ms=250)
+            if attempt_timeout_ms is None:
+                break
+            menu_note = self._open_menu_hint(page=page, label=menu_hint, timeout_ms=min(attempt_timeout_ms, 1200))
+            if menu_note:
+                attempts = self._build_click_attempts(page=page, step=step)
+                for locator, note in attempts:
+                    retry_timeout_ms = self._remaining_timeout_ms(deadline=deadline, minimum_ms=250)
+                    if retry_timeout_ms is None:
+                        break
+                    if self._try_click_locator(locator, timeout_ms=min(retry_timeout_ms, 1200)):
+                        return f"{menu_note}; {note}"
+
+        raise AssertionError(
+            "Could not resolve click target. "
+            f"selector={step.selector!r}, candidate_labels={step.candidate_labels}, "
+            f"candidate_selectors={step.candidate_selectors}, menu_hints={step.menu_hints}"
+        )
+
+    def _build_click_attempts(self, page: Page, step: TestStep):
+        attempts = []
+
+        if step.selector:
+            attempts.append((self._resolve_click_target(page, step.selector), f"clicked selector {step.selector}"))
+
+        for selector in step.candidate_selectors:
+            attempts.append((self._resolve_click_target(page, selector), f"clicked candidate selector {selector}"))
+
+        for label in step.candidate_labels:
+            attempts.extend(self._semantic_locators_for_label(page=page, label=label))
+
+        # Remove duplicate notes while preserving order.
+        deduped = []
+        seen_notes = set()
+        for locator, note in attempts:
+            if note in seen_notes:
+                continue
+            deduped.append((locator, note))
+            seen_notes.add(note)
+        return deduped
+
+    def _semantic_locators_for_label(self, page: Page, label: str):
+        css_safe_label = label.replace("'", "\\'")
+        return [
+            (page.get_by_role("button", name=label, exact=False).first, f"clicked button role by label {label}"),
+            (page.get_by_role("link", name=label, exact=False).first, f"clicked link role by label {label}"),
+            (page.get_by_label(label, exact=False).first, f"clicked aria label {label}"),
+            (
+                page.locator(
+                    f"[aria-label*='{css_safe_label}' i], [title*='{css_safe_label}' i], img[alt*='{css_safe_label}' i]"
+                ).first,
+                f"clicked aria/title/alt candidate {label}",
+            ),
+            (page.get_by_text(label, exact=False).first, f"clicked partial text candidate {label}"),
+        ]
+
+    def _try_click_locator(self, locator, timeout_ms: int) -> bool:
         try:
-            locator = page.get_by_text(expected, exact=False).first
             if locator.count() < 1:
                 return False
         except Exception:
@@ -449,18 +596,23 @@ class BrowserExecutor:
             pass
 
         try:
-            actual = locator.inner_text(timeout=timeout_ms).strip()
-            if actual and self._text_matches(actual=actual, expected=expected, mode=mode):
-                return True
+            locator.click(timeout=timeout_ms)
+            return True
         except Exception:
-            pass
+            return False
 
-        try:
-            text_content = locator.text_content(timeout=timeout_ms)
-        except Exception:
-            text_content = None
+    def _open_menu_hint(self, page: Page, label: str, timeout_ms: int) -> Optional[str]:
+        for locator, note in self._semantic_locators_for_label(page=page, label=label):
+            if self._try_click_locator(locator, timeout_ms=timeout_ms):
+                page.wait_for_timeout(250)
+                return f"opened menu hint {label} via {note}"
+        return None
 
-        return bool(text_content) and self._text_matches(actual=text_content, expected=expected, mode=mode)
+    def _remaining_timeout_ms(self, *, deadline: float, minimum_ms: int) -> Optional[int]:
+        remaining_ms = int((deadline - time.monotonic()) * 1000)
+        if remaining_ms < minimum_ms:
+            return None
+        return remaining_ms
 
     def _scroll_intelligently_for_text(self, page: Page, selector: str, expected: str) -> None:
         """

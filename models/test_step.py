@@ -34,6 +34,19 @@ class TestStep(BaseModel):
     # For `click`, `fill`, `press` (optional), `assert_text`
     selector: Optional[str] = None
 
+    # Optional semantic planning fields.
+    #
+    # These make the step more flexible without changing the executor into an
+    # autonomous agent. The executor still tries them in a fixed deterministic
+    # order.
+    intent: Optional[str] = None
+    candidate_labels: list[str] = Field(default_factory=list)
+    candidate_selectors: list[str] = Field(default_factory=list)
+    menu_hints: list[str] = Field(default_factory=list)
+    fallback_actions: list[str] = Field(default_factory=list)
+    memory_hint_ids: list[str] = Field(default_factory=list)
+    optional: bool = False
+
     # For `fill`
     text: Optional[str] = None
 
@@ -57,8 +70,8 @@ class TestStep(BaseModel):
             if not self.url:
                 raise ValueError("goto steps require `url`.")
         elif self.action == StepAction.click:
-            if not self.selector:
-                raise ValueError("click steps require `selector`.")
+            if not self.selector and not self.candidate_labels and not self.candidate_selectors:
+                raise ValueError("click steps require `selector` or semantic fallback candidates.")
         elif self.action == StepAction.fill:
             if not self.selector:
                 raise ValueError("fill steps require `selector`.")
@@ -68,8 +81,8 @@ class TestStep(BaseModel):
             if not self.key:
                 raise ValueError("press steps require `key`.")
         elif self.action == StepAction.assert_text:
-            if not self.selector:
-                raise ValueError("assert_text steps require `selector`.")
+            if not self.selector and not self.candidate_labels and not self.candidate_selectors:
+                raise ValueError("assert_text steps require `selector` or semantic fallback candidates.")
             if self.expected_text is None:
                 raise ValueError("assert_text steps require `expected_text`.")
         elif self.action == StepAction.screenshot:

@@ -18,6 +18,8 @@ class StepExecution(BaseModel):
     page_url: Optional[str] = None
     screenshot_path: Optional[str] = None
     error_message: Optional[str] = None
+    resolution_notes: list[str] = Field(default_factory=list)
+    memory_hint_ids_used: list[str] = Field(default_factory=list)
 
 
 class ConsoleError(BaseModel):
@@ -41,6 +43,8 @@ class FailedStepDetails(BaseModel):
     error_message: str
     page_url: Optional[str] = None
     screenshot_path: Optional[str] = None
+    resolution_notes: list[str] = Field(default_factory=list)
+    memory_hint_ids_used: list[str] = Field(default_factory=list)
 
 
 class TestReport(BaseModel):
@@ -58,6 +62,11 @@ class TestReport(BaseModel):
     likely_failure_cause: str = ""
     reproduction_notes: str = ""
     severity_guess: Optional[Literal["low", "medium", "high"]] = None
+    memory_consulted: bool = False
+    memory_domain: Optional[str] = None
+    domain_hint_ids_consulted: list[str] = Field(default_factory=list)
+    global_hint_ids_consulted: list[str] = Field(default_factory=list)
+    fallback_paths_used: list[str] = Field(default_factory=list)
 
     steps_executed: list[StepExecution] = Field(default_factory=list)
     failed_step: Optional[FailedStepDetails] = None
