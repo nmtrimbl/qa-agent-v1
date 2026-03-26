@@ -9,7 +9,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from models.test_report import FailedStepDetails, StepExecution, TestReport
+from models.test_report import ClickedElementDetails, FailedStepDetails, StepExecution, TestReport
 from models.test_step import StepAction, TestStep
 
 
@@ -59,11 +59,18 @@ def test_step_execution_supports_page_url_and_screenshot_path():
         screenshot_path="/tmp/example.png",
         resolution_notes=["clicked button role by label Sign In"],
         memory_hint_ids_used=["global:login_account_icon"],
+        clicked_element=ClickedElementDetails(
+            tag_name="a",
+            text="Sign In",
+            outer_html='<a title="Sign In">Sign In</a>',
+        ),
     )
     assert execution.step_index == 0
     assert execution.page_url == "https://example.com"
     assert execution.screenshot_path == "/tmp/example.png"
     assert execution.memory_hint_ids_used == ["global:login_account_icon"]
+    assert execution.clicked_element is not None
+    assert execution.clicked_element.tag_name == "a"
 
 
 def test_report_can_include_failed_step_details():

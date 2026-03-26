@@ -81,10 +81,15 @@ class FakePage:
 
 
 class FakeLocator:
-    def __init__(self, *, visible=True, click_raises=False, children=None):
+    def __init__(self, *, visible=True, click_raises=False, children=None, element_payload=None):
         self._visible = visible
         self._click_raises = click_raises
         self._children = children
+        self._element_payload = element_payload or {
+            "tag_name": "a",
+            "text": "Sign In",
+            "outer_html": '<a title="Sign In">Sign In</a>',
+        }
         self.click_calls = 0
         self.scroll_calls = 0
 
@@ -95,7 +100,7 @@ class FakeLocator:
     def count(self):
         if self._children is not None:
             return len(self._children)
-        return 0
+        return 1
 
     def is_visible(self):
         return self._visible
@@ -117,6 +122,9 @@ class FakeLocator:
             raise RuntimeError("click failed")
         return None
 
+    def evaluate(self, script):
+        return dict(self._element_payload)
+
 
 def test_try_click_locator_prefers_visible_match_when_first_is_hidden():
     executor = BrowserExecutor(artifacts_dir="artifacts")
@@ -126,7 +134,10 @@ def test_try_click_locator_prefers_visible_match_when_first_is_hidden():
 
     clicked = executor._try_click_locator(locator, timeout_ms=500)
 
-    assert clicked is True
+    assert clicked.clicked is True
+    assert clicked.clicked_element is not None
+    assert clicked.clicked_element.tag_name == "a"
+    assert clicked.clicked_element.text == "Sign In"
     assert hidden.click_calls == 0
     assert visible.click_calls == 1
 

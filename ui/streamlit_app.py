@@ -28,6 +28,23 @@ def _safe_image(path: str):
         st.write(f"Screenshot: {path}")
 
 
+def _human_readable_action(step) -> str:
+    action_name = step.action.value
+    if action_name == "goto":
+        return "Navigate to URL"
+    if action_name == "click":
+        return "Click element"
+    if action_name == "fill":
+        return "Enter text into field"
+    if action_name == "press":
+        return "Press keyboard key"
+    if action_name == "assert_text":
+        return "Verify text appears"
+    if action_name == "screenshot":
+        return "Capture screenshot"
+    return action_name.replace("_", " ").title()
+
+
 def _render_summary(report: TestReport) -> None:
     status_col, severity_col, url_col = st.columns(3)
     status_col.metric("Status", report.overall_status)
@@ -81,10 +98,16 @@ def _render_steps(report: TestReport) -> None:
             {
                 "Step": step_exec.step_index + 1,
                 "Action": step_exec.step.action.value,
+                "Human Action": _human_readable_action(step_exec.step),
                 "Status": step_exec.status,
                 "Selector": step_exec.step.selector or "",
+                "Candidate Labels": " | ".join(step_exec.step.candidate_labels),
+                "Candidate Selectors": " | ".join(step_exec.step.candidate_selectors),
                 "Expected Text": step_exec.step.expected_text or "",
                 "Page URL": step_exec.page_url or "",
+                "Clicked Tag": step_exec.clicked_element.tag_name if step_exec.clicked_element else "",
+                "Clicked Text": step_exec.clicked_element.text if step_exec.clicked_element else "",
+                "Clicked Element HTML": step_exec.clicked_element.outer_html if step_exec.clicked_element else "",
                 "Fallback Notes": " | ".join(step_exec.resolution_notes),
             }
         )
@@ -95,15 +118,36 @@ def _render_steps(report: TestReport) -> None:
         st.write("No executed steps were recorded.")
 
     for step_exec in report.steps_executed:
-        if step_exec.error_message:
-            with st.expander(f"Step {step_exec.step_index + 1} error details"):
+        with st.expander(f"Step {step_exec.step_index + 1} details"):
+            st.write(f"Human action: {_human_readable_action(step_exec.step)}")
+            st.write(f"Status: {step_exec.status}")
+            if step_exec.page_url:
+                st.write(f"Page URL: {step_exec.page_url}")
+            if step_exec.step.selector:
+                st.write(f"Selector: `{step_exec.step.selector}`")
+            if step_exec.step.candidate_labels:
+                st.write("Candidate labels:")
+                for label in step_exec.step.candidate_labels:
+                    st.write(f"- {label}")
+            if step_exec.step.candidate_selectors:
+                st.write("Candidate selectors:")
+                for selector in step_exec.step.candidate_selectors:
+                    st.write(f"- `{selector}`")
+            if step_exec.step.expected_text:
+                st.write(f"Expected text: `{step_exec.step.expected_text}`")
+            if step_exec.clicked_element:
+                st.write(f"Clicked tag: `{step_exec.clicked_element.tag_name or 'unknown'}`")
+                st.write(f"Clicked text: {step_exec.clicked_element.text or '(no text)'}")
+                st.code(step_exec.clicked_element.outer_html or "", language="html")
+            if step_exec.error_message:
+                st.write("Error:")
                 st.code(step_exec.error_message)
-                if step_exec.resolution_notes:
-                    st.write("Fallback notes:")
-                    for note in step_exec.resolution_notes:
-                        st.write(f"- {note}")
-                if step_exec.screenshot_path:
-                    _safe_image(step_exec.screenshot_path)
+            if step_exec.resolution_notes:
+                st.write("Fallback notes:")
+                for note in step_exec.resolution_notes:
+                    st.write(f"- {note}")
+            if step_exec.screenshot_path:
+                _safe_image(step_exec.screenshot_path)
 
 
 def _render_failure_details(report: TestReport) -> None:
@@ -115,12 +159,17 @@ def _render_failure_details(report: TestReport) -> None:
     failed_step = report.failed_step
     st.write(f"Failed step: {failed_step.step_index + 1}")
     st.write(f"Action: {failed_step.step.action.value}")
+    st.write(f"Human action: {_human_readable_action(failed_step.step)}")
     if failed_step.step.selector:
         st.write(f"Selector: `{failed_step.step.selector}`")
     if failed_step.step.expected_text:
         st.write(f"Expected text: `{failed_step.step.expected_text}`")
     if failed_step.page_url:
         st.write(f"Page URL: {failed_step.page_url}")
+    if failed_step.clicked_element:
+        st.write(f"Clicked tag: `{failed_step.clicked_element.tag_name or 'unknown'}`")
+        st.write(f"Clicked text: {failed_step.clicked_element.text or '(no text)'}")
+        st.code(failed_step.clicked_element.outer_html or "", language="html")
     if failed_step.memory_hint_ids_used:
         st.write("Memory hints tied to the failed step:")
         for hint_id in failed_step.memory_hint_ids_used:

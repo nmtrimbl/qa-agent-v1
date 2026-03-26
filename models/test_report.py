@@ -8,6 +8,16 @@ from pydantic import BaseModel, Field
 from models.test_step import TestStep
 
 
+class ClickedElementDetails(BaseModel):
+    """
+    Describes the actual DOM element the executor clicked.
+    """
+
+    tag_name: str = ""
+    text: str = ""
+    outer_html: str = ""
+
+
 class StepExecution(BaseModel):
     """
     Captures what happened when executing one planned step.
@@ -21,6 +31,7 @@ class StepExecution(BaseModel):
     error_message: Optional[str] = None
     resolution_notes: list[str] = Field(default_factory=list)
     memory_hint_ids_used: list[str] = Field(default_factory=list)
+    clicked_element: Optional[ClickedElementDetails] = None
 
 
 class ConsoleError(BaseModel):
@@ -46,6 +57,7 @@ class FailedStepDetails(BaseModel):
     screenshot_path: Optional[str] = None
     resolution_notes: list[str] = Field(default_factory=list)
     memory_hint_ids_used: list[str] = Field(default_factory=list)
+    clicked_element: Optional[ClickedElementDetails] = None
 
 
 class TestReport(BaseModel):
