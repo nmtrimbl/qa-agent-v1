@@ -13,7 +13,7 @@ from PIL import Image
 from pydantic import BaseModel
 
 from browser.browser_session import BrowserSession
-from models.test_report import ClickedElementDetails, ConsoleError, FailedStepDetails, StepExecution
+from models.test_report import ConsoleError, FailedStepDetails, StepExecution, TargetElementDetails
 from models.test_step import StepAction, TestStep
 from utils.file_helpers import ensure_dir, safe_filename, write_json
 
@@ -40,17 +40,18 @@ class StepRunInfo(BaseModel):
     screenshot_path: Optional[str] = None
     resolution_notes: list[str] = []
     memory_hint_ids_used: list[str] = []
-    clicked_element: Optional[ClickedElementDetails] = None
+    filled_text: Optional[str] = None
+    target_element: Optional[TargetElementDetails] = None
 
 
 class ClickAttemptResult(BaseModel):
     clicked: bool
-    clicked_element: Optional[ClickedElementDetails] = None
+    target_element: Optional[TargetElementDetails] = None
 
 
 class ClickResolution(BaseModel):
     note: str
-    clicked_element: Optional[ClickedElementDetails] = None
+    target_element: Optional[TargetElementDetails] = None
 
 
 class BrowserExecutor:
@@ -132,9 +133,10 @@ class BrowserExecutor:
                         status="ok",
                         page_url=page.url,
                         screenshot_path=step_run_info.screenshot_path,
+                        filled_text=step_run_info.filled_text,
                         resolution_notes=step_run_info.resolution_notes,
                         memory_hint_ids_used=step_run_info.memory_hint_ids_used,
-                        clicked_element=step_run_info.clicked_element,
+                        target_element=step_run_info.target_element,
                     )
                 )
             except Exception as e:
@@ -167,8 +169,9 @@ class BrowserExecutor:
                         page_url=page.url,
                         screenshot_path=failure_screenshot_str,
                         error_message=str(e),
+                        filled_text=step.text if step.action == StepAction.fill else None,
                         memory_hint_ids_used=list(step.memory_hint_ids),
-                        clicked_element=None,
+                        target_element=None,
                     )
                 )
                 failed_step_details = FailedStepDetails(
@@ -177,8 +180,9 @@ class BrowserExecutor:
                     error_message=str(e),
                     page_url=page.url,
                     screenshot_path=failure_screenshot_str,
+                    filled_text=step.text if step.action == StepAction.fill else None,
                     memory_hint_ids_used=list(step.memory_hint_ids),
-                    clicked_element=None,
+                    target_element=None,
                 )
 
                 # Requirement: stop on failure to keep results clear for beginner MVP.
@@ -242,7 +246,7 @@ class BrowserExecutor:
             click_result = self._click_with_fallbacks(page=page, step=step)
             if click_result:
                 result.resolution_notes.append(click_result.note)
-                result.clicked_element = click_result.clicked_element
+                result.target_element = click_result.target_element
             self._wait_after_page_change(page, timeout_ms=step.timeout_ms)
             return result
 
@@ -251,7 +255,10 @@ class BrowserExecutor:
                 raise ValueError("fill does not support `text=` selectors. Use a CSS selector for inputs.")
             if not step.selector:
                 raise ValueError("fill requires `selector`.")
-            page.locator(step.selector).fill(step.text or "", timeout=step.timeout_ms)
+            fill_target = page.locator(step.selector).first
+            result.target_element = self._describe_locator_element(fill_target)
+            result.filled_text = step.text or ""
+            fill_target.fill(step.text or "", timeout=step.timeout_ms)
             page.wait_for_timeout(150)
             return result
 
@@ -261,8 +268,8 @@ class BrowserExecutor:
                 click_result = self._click_with_fallbacks(page=page, step=step)
                 if click_result:
                     result.resolution_notes.append(click_result.note)
-                    result.clicked_element = click_result.clicked_element
-            page.keyboard.press(step.key, timeout=step.timeout_ms)
+                    result.target_element = click_result.target_element
+            page.keyboard.press(step.key)
             self._wait_after_page_change(page, timeout_ms=step.timeout_ms)
             return result
 
@@ -541,7 +548,7 @@ class BrowserExecutor:
                 break
             click_attempt = self._try_click_locator(locator, timeout_ms=min(attempt_timeout_ms, 1200))
             if click_attempt.clicked:
-                return ClickResolution(note=note, clicked_element=click_attempt.clicked_element)
+                return ClickResolution(note=note, target_element=click_attempt.target_element)
 
         for menu_hint in self._normalize_candidate_labels(step.menu_hints):
             attempt_timeout_ms = self._remaining_timeout_ms(deadline=deadline, minimum_ms=250)
@@ -558,7 +565,7 @@ class BrowserExecutor:
                     if click_attempt.clicked:
                         return ClickResolution(
                             note=f"{menu_note}; {note}",
-                            clicked_element=click_attempt.clicked_element,
+                            target_element=click_attempt.target_element,
                         )
 
         raise AssertionError(
@@ -645,13 +652,13 @@ class BrowserExecutor:
 
             try:
                 candidate.click(timeout=timeout_ms)
-                return ClickAttemptResult(clicked=True, clicked_element=element_details)
+                return ClickAttemptResult(clicked=True, target_element=element_details)
             except Exception:
                 continue
 
         return ClickAttemptResult(clicked=False)
 
-    def _describe_locator_element(self, locator) -> Optional[ClickedElementDetails]:
+    def _describe_locator_element(self, locator) -> Optional[TargetElementDetails]:
         """
         Capture a small structured description of the element before clicking it.
 
@@ -673,7 +680,7 @@ class BrowserExecutor:
         if not isinstance(payload, dict):
             return None
 
-        return ClickedElementDetails(
+        return TargetElementDetails(
             tag_name=str(payload.get("tag_name") or ""),
             text=str(payload.get("text") or ""),
             outer_html=str(payload.get("outer_html") or ""),

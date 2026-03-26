@@ -45,6 +45,8 @@ class FakePage:
         self.url = "about:blank"
         self.viewport_size = {"width": 1280, "height": 800}
         self.viewport_size_calls = []
+        self.keyboard = FakeKeyboard()
+        self.last_locator = None
 
     def goto(self, url, wait_until, timeout):
         self.goto_calls.append({"url": url, "wait_until": wait_until, "timeout": timeout})
@@ -77,7 +79,8 @@ class FakePage:
         self.screenshot_calls.append({"path": path, "full_page": full_page})
 
     def locator(self, selector):
-        return FakeLocator()
+        self.last_locator = FakeLocator()
+        return self.last_locator
 
 
 class FakeLocator:
@@ -92,6 +95,7 @@ class FakeLocator:
         }
         self.click_calls = 0
         self.scroll_calls = 0
+        self.fill_calls = []
 
     @property
     def first(self):
@@ -122,8 +126,20 @@ class FakeLocator:
             raise RuntimeError("click failed")
         return None
 
+    def fill(self, text, timeout):
+        self.fill_calls.append({"text": text, "timeout": timeout})
+        return None
+
     def evaluate(self, script):
         return dict(self._element_payload)
+
+
+class FakeKeyboard:
+    def __init__(self):
+        self.press_calls = []
+
+    def press(self, key):
+        self.press_calls.append(key)
 
 
 def test_try_click_locator_prefers_visible_match_when_first_is_hidden():
@@ -135,9 +151,9 @@ def test_try_click_locator_prefers_visible_match_when_first_is_hidden():
     clicked = executor._try_click_locator(locator, timeout_ms=500)
 
     assert clicked.clicked is True
-    assert clicked.clicked_element is not None
-    assert clicked.clicked_element.tag_name == "a"
-    assert clicked.clicked_element.text == "Sign In"
+    assert clicked.target_element is not None
+    assert clicked.target_element.tag_name == "a"
+    assert clicked.target_element.text == "Sign In"
     assert hidden.click_calls == 0
     assert visible.click_calls == 1
 
@@ -191,3 +207,35 @@ def test_goto_uses_more_tolerant_navigation_defaults(tmp_path):
     assert page.goto_calls == [
         {"url": "https://example.com", "wait_until": "domcontentloaded", "timeout": 15000}
     ]
+
+
+def test_press_uses_playwright_sync_keyboard_api_without_timeout(tmp_path):
+    executor = BrowserExecutor(artifacts_dir=tmp_path)
+    page = FakePage()
+
+    result = executor._execute_single_step(
+        page=page,
+        step=TestStep(action=StepAction.press, key="Enter"),
+        screenshots_dir=tmp_path,
+        screenshot_paths=[],
+    )
+
+    assert result.screenshot_path is None
+    assert page.keyboard.press_calls == ["Enter"]
+
+
+def test_fill_enters_text_without_pressing_keyboard(tmp_path):
+    executor = BrowserExecutor(artifacts_dir=tmp_path)
+    page = FakePage()
+
+    result = executor._execute_single_step(
+        page=page,
+        step=TestStep(action=StepAction.fill, selector="input[name='q']", text="pool filter"),
+        screenshots_dir=tmp_path,
+        screenshot_paths=[],
+    )
+
+    assert result.filled_text == "pool filter"
+    assert page.last_locator is not None
+    assert page.last_locator.fill_calls == [{"text": "pool filter", "timeout": 5000}]
+    assert page.keyboard.press_calls == []

@@ -101,13 +101,13 @@ def _render_steps(report: TestReport) -> None:
                 "Human Action": _human_readable_action(step_exec.step),
                 "Status": step_exec.status,
                 "Selector": step_exec.step.selector or "",
+                "Filled Text": step_exec.filled_text or "",
+                "Pressed Key": step_exec.step.key or "",
                 "Candidate Labels": " | ".join(step_exec.step.candidate_labels),
                 "Candidate Selectors": " | ".join(step_exec.step.candidate_selectors),
                 "Expected Text": step_exec.step.expected_text or "",
                 "Page URL": step_exec.page_url or "",
-                "Clicked Tag": step_exec.clicked_element.tag_name if step_exec.clicked_element else "",
-                "Clicked Text": step_exec.clicked_element.text if step_exec.clicked_element else "",
-                "Clicked Element HTML": step_exec.clicked_element.outer_html if step_exec.clicked_element else "",
+                "Target HTML": step_exec.target_element.outer_html if step_exec.target_element else "",
                 "Fallback Notes": " | ".join(step_exec.resolution_notes),
             }
         )
@@ -135,10 +135,12 @@ def _render_steps(report: TestReport) -> None:
                     st.write(f"- `{selector}`")
             if step_exec.step.expected_text:
                 st.write(f"Expected text: `{step_exec.step.expected_text}`")
-            if step_exec.clicked_element:
-                st.write(f"Clicked tag: `{step_exec.clicked_element.tag_name or 'unknown'}`")
-                st.write(f"Clicked text: {step_exec.clicked_element.text or '(no text)'}")
-                st.code(step_exec.clicked_element.outer_html or "", language="html")
+            if step_exec.filled_text is not None:
+                st.write(f"Filled text: {step_exec.filled_text}")
+            if step_exec.target_element:
+                st.write(f"Target tag: `{step_exec.target_element.tag_name or 'unknown'}`")
+                st.write(f"Target text: {step_exec.target_element.text or '(no text)'}")
+                st.code(step_exec.target_element.outer_html or "", language="html")
             if step_exec.error_message:
                 st.write("Error:")
                 st.code(step_exec.error_message)
@@ -166,10 +168,12 @@ def _render_failure_details(report: TestReport) -> None:
         st.write(f"Expected text: `{failed_step.step.expected_text}`")
     if failed_step.page_url:
         st.write(f"Page URL: {failed_step.page_url}")
-    if failed_step.clicked_element:
-        st.write(f"Clicked tag: `{failed_step.clicked_element.tag_name or 'unknown'}`")
-        st.write(f"Clicked text: {failed_step.clicked_element.text or '(no text)'}")
-        st.code(failed_step.clicked_element.outer_html or "", language="html")
+    if failed_step.filled_text is not None:
+        st.write(f"Filled text: {failed_step.filled_text}")
+    if failed_step.target_element:
+        st.write(f"Target tag: `{failed_step.target_element.tag_name or 'unknown'}`")
+        st.write(f"Target text: {failed_step.target_element.text or '(no text)'}")
+        st.code(failed_step.target_element.outer_html or "", language="html")
     if failed_step.memory_hint_ids_used:
         st.write("Memory hints tied to the failed step:")
         for hint_id in failed_step.memory_hint_ids_used:

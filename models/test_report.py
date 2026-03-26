@@ -8,9 +8,9 @@ from pydantic import BaseModel, Field
 from models.test_step import TestStep
 
 
-class ClickedElementDetails(BaseModel):
+class TargetElementDetails(BaseModel):
     """
-    Describes the actual DOM element the executor clicked.
+    Describes the relevant DOM element the executor acted on.
     """
 
     tag_name: str = ""
@@ -29,9 +29,10 @@ class StepExecution(BaseModel):
     page_url: Optional[str] = None
     screenshot_path: Optional[str] = None
     error_message: Optional[str] = None
+    filled_text: Optional[str] = None
     resolution_notes: list[str] = Field(default_factory=list)
     memory_hint_ids_used: list[str] = Field(default_factory=list)
-    clicked_element: Optional[ClickedElementDetails] = None
+    target_element: Optional[TargetElementDetails] = None
 
 
 class ConsoleError(BaseModel):
@@ -55,9 +56,10 @@ class FailedStepDetails(BaseModel):
     error_message: str
     page_url: Optional[str] = None
     screenshot_path: Optional[str] = None
+    filled_text: Optional[str] = None
     resolution_notes: list[str] = Field(default_factory=list)
     memory_hint_ids_used: list[str] = Field(default_factory=list)
-    clicked_element: Optional[ClickedElementDetails] = None
+    target_element: Optional[TargetElementDetails] = None
 
 
 class TestReport(BaseModel):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Optional
 
 from openai import OpenAI
@@ -46,6 +47,7 @@ def _canonicalize_steps(url: str, steps: list[TestStep]) -> list[TestStep]:
 
     # Keep it small and beginner-friendly.
     steps = steps[:20]
+    steps = [_normalize_selector_fields(step) for step in steps]
 
     # Ensure first step is `goto` for the provided URL.
     if not steps or steps[0].action != StepAction.goto:
@@ -59,6 +61,39 @@ def _canonicalize_steps(url: str, steps: list[TestStep]) -> list[TestStep]:
         steps.append(TestStep(action=StepAction.screenshot, screenshot_name="final", full_page=True))
 
     return steps
+
+
+def _normalize_selector_fields(step: TestStep) -> TestStep:
+    """
+    Keep single `selector` and list-based `candidate_selectors` separate.
+
+    The planner sometimes returns a comma-separated selector list inside the
+    single `selector` field. For click/assert flows we normalize that into
+    `candidate_selectors`, because the executor treats these as fallback
+    choices. For `fill`, we keep `selector` unchanged because Playwright allows
+    comma-separated CSS selectors there and the field is required.
+    """
+
+    if not step.selector or step.action == StepAction.fill:
+        return step
+
+    selector_parts = [part.strip() for part in re.split(r"\s*,\s*", step.selector) if part.strip()]
+    if len(selector_parts) <= 1:
+        return step
+
+    merged_candidate_selectors: list[str] = []
+    seen: set[str] = set()
+    for selector in selector_parts + list(step.candidate_selectors):
+        clean = selector.strip()
+        if not clean or clean in seen:
+            continue
+        merged_candidate_selectors.append(clean)
+        seen.add(clean)
+
+    step_data = step.model_dump(mode="python")
+    step_data["selector"] = None
+    step_data["candidate_selectors"] = merged_candidate_selectors
+    return TestStep.model_validate(step_data)
 
 
 def plan_test_steps(
@@ -130,8 +165,8 @@ def plan_test_steps(
         "(no unknown keys). You may omit fields with defaults.\n"
         "Mandatory fields per action:\n"
         "- goto: must include `url`\n"
-        "- click: must include `selector`, or semantic fields like `candidate_labels` or `candidate_selectors`\n"
-        "- fill: must include `selector` and `text`\n"
+        "- click: should prefer `candidate_selectors` and `candidate_labels` for alternatives; use `selector` only for one exact selector string\n"
+        "- fill: must include `selector` and `text`, and only enters text without submitting the form\n"
         "- press: must include `key` (optional: `selector`)\n"
         "- assert_text: must include `expected_text`, plus `selector` or semantic fallback candidates\n"
         "- screenshot: optional `screenshot_name`, optional `full_page`\n"
@@ -163,8 +198,12 @@ def plan_test_steps(
         "5) If a menu or account icon might need to open first, add `menu_hints` or an intermediate click step.\n"
         "6) Use `memory_hint_ids` only for relevant hints. Do not copy every hint into every step.\n"
         "7) For `fill`, use CSS selectors only.\n"
-        "8) Include at least one `screenshot` step near the end.\n"
-        "9) Max 20 steps."
+        "8) `fill` must not submit the form. If submission is needed, add a separate `press` or `click` step after `fill`.\n"
+        "9) Include at least one `screenshot` step near the end.\n"
+        "10) `selector` must be a single selector string only, never a comma-separated list.\n"
+        "11) If you want multiple selector options, put them in `candidate_selectors` as a JSON array.\n"
+        "12) For click and assert_text, prefer `candidate_selectors` over `selector` when there are multiple possible targets.\n"
+        "13) Max 20 steps."
     )
 
     # Retry logic (only once) for invalid JSON or schema mismatch.
@@ -198,6 +237,8 @@ def plan_test_steps(
                 "Return ONLY corrected JSON that matches:\n"
                 '{ "steps": [ ... ] }\n'
                 "Each step must only use fields supported by the Pydantic TestStep schema.\n"
+                "Use `selector` only for one selector string. If there are multiple selectors, put them in `candidate_selectors`.\n"
+                "A `fill` step only enters text and must not submit the form. Use a separate `press` or `click` step for submission.\n"
                 f"{extra_repair_rule}\n"
                 "Supported actions: " + ", ".join(sorted(SUPPORTED_ACTIONS)) + ".\n"
                 "No markdown, no extra keys."
