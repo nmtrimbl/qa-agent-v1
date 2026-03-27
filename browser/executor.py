@@ -119,6 +119,7 @@ class BrowserExecutor:
         failed_step_details: Optional[FailedStepDetails] = None
 
         for step_index, step in enumerate(steps):
+            url_before = page.url
             try:
                 step_run_info = self._execute_single_step(
                     page=page,
@@ -131,6 +132,7 @@ class BrowserExecutor:
                         step_index=step_index,
                         step=step,
                         status="ok",
+                        page_url_before=url_before,
                         page_url=page.url,
                         screenshot_path=step_run_info.screenshot_path,
                         filled_text=step_run_info.filled_text,
@@ -147,7 +149,11 @@ class BrowserExecutor:
                 failure_shot_path = screenshots_dir / f"failure_step_{step_index}_{safe_filename(step.action.value)}.png"
                 failure_screenshot_str: Optional[str] = None
                 try:
-                    self._capture_full_page_screenshot(page, failure_shot_path)
+                    # Use Playwright's native full_page=True (scroll-stitch) rather than
+                    # _capture_full_page_screenshot (viewport-resize). Scroll-stitch
+                    # preserves the viewport size so fixed overlays (popups, modals)
+                    # render at their correct screen position in the capture.
+                    page.screenshot(path=str(failure_shot_path), full_page=True)
                     failure_screenshot_str = str(failure_shot_path)
                     screenshot_paths.append(failure_screenshot_str)
                 except Exception:
@@ -166,6 +172,7 @@ class BrowserExecutor:
                         step_index=step_index,
                         step=step,
                         status="failed",
+                        page_url_before=url_before,
                         page_url=page.url,
                         screenshot_path=failure_screenshot_str,
                         error_message=str(e),
@@ -500,6 +507,7 @@ class BrowserExecutor:
 
         labels_to_try = [expected] + [label for label in (candidate_labels or []) if label != expected]
         for label in labels_to_try:
+            is_candidate_label = label != expected
             try:
                 locator = page.get_by_text(label, exact=False).first
                 if locator.count() < 1:
@@ -514,18 +522,25 @@ class BrowserExecutor:
 
             try:
                 actual = locator.inner_text(timeout=timeout_ms).strip()
-                if actual and self._text_matches(actual=actual, expected=expected, mode=mode):
-                    return True
+                if not actual:
+                    raise ValueError("empty")
             except Exception:
-                pass
+                actual = None
+
+            if actual:
+                # Candidate labels are acceptable phrasings of the expected text —
+                # finding one visible on the page is a match in its own right.
+                if is_candidate_label or self._text_matches(actual=actual, expected=expected, mode=mode):
+                    return True
 
             try:
                 text_content = locator.text_content(timeout=timeout_ms)
             except Exception:
                 text_content = None
 
-            if text_content and self._text_matches(actual=text_content, expected=expected, mode=mode):
-                return True
+            if text_content:
+                if is_candidate_label or self._text_matches(actual=text_content, expected=expected, mode=mode):
+                    return True
 
         return False
 
@@ -546,7 +561,7 @@ class BrowserExecutor:
             attempt_timeout_ms = self._remaining_timeout_ms(deadline=deadline, minimum_ms=250)
             if attempt_timeout_ms is None:
                 break
-            click_attempt = self._try_click_locator(locator, timeout_ms=min(attempt_timeout_ms, 1200))
+            click_attempt = self._try_click_locator(locator, timeout_ms=min(attempt_timeout_ms, 1200), page=page)
             if click_attempt.clicked:
                 return ClickResolution(note=note, target_element=click_attempt.target_element)
 
@@ -561,7 +576,7 @@ class BrowserExecutor:
                     retry_timeout_ms = self._remaining_timeout_ms(deadline=deadline, minimum_ms=250)
                     if retry_timeout_ms is None:
                         break
-                    click_attempt = self._try_click_locator(locator, timeout_ms=min(retry_timeout_ms, 1200))
+                    click_attempt = self._try_click_locator(locator, timeout_ms=min(retry_timeout_ms, 1200), page=page)
                     if click_attempt.clicked:
                         return ClickResolution(
                             note=f"{menu_note}; {note}",
@@ -601,7 +616,9 @@ class BrowserExecutor:
         return [
             (page.get_by_role("button", name=label, exact=False).first, f"clicked button role by label {label}"),
             (page.get_by_role("link", name=label, exact=False).first, f"clicked link role by label {label}"),
+            (page.get_by_role("radio", name=label, exact=False).first, f"clicked radio role by label {label}"),
             (page.get_by_label(label, exact=False).first, f"clicked aria label {label}"),
+            (page.locator(f"label:has-text('{css_safe_label}')").first, f"clicked label text candidate {label}"),
             (
                 page.locator(
                     f"[aria-label*='{css_safe_label}' i], [title*='{css_safe_label}' i], img[alt*='{css_safe_label}' i]"
@@ -611,7 +628,7 @@ class BrowserExecutor:
             (page.get_by_text(label, exact=False).first, f"clicked partial text candidate {label}"),
         ]
 
-    def _try_click_locator(self, locator, timeout_ms: int) -> ClickAttemptResult:
+    def _try_click_locator(self, locator, timeout_ms: int, page: Optional[Page] = None) -> ClickAttemptResult:
         try:
             match_count = locator.count()
             if match_count < 1:
@@ -644,19 +661,54 @@ class BrowserExecutor:
             fallback_candidates.append(candidate)
 
         for candidate in visible_candidates + fallback_candidates:
-            element_details = self._describe_locator_element(candidate)
-            try:
-                candidate.scroll_into_view_if_needed(timeout=timeout_ms)
-            except Exception:
-                pass
+            for click_target in self._expand_click_targets(candidate):
+                element_details = self._describe_locator_element(click_target)
+                try:
+                    click_target.scroll_into_view_if_needed(timeout=timeout_ms)
+                except Exception:
+                    pass
 
-            try:
-                candidate.click(timeout=timeout_ms)
-                return ClickAttemptResult(clicked=True, target_element=element_details)
-            except Exception:
-                continue
+                url_before_click = page.url if page else None
+                try:
+                    click_target.click(timeout=timeout_ms)
+                    return ClickAttemptResult(clicked=True, target_element=element_details)
+                except Exception:
+                    # If the URL changed, the click triggered navigation even though
+                    # Playwright raised an error (e.g. frame detached, navigation
+                    # timeout). Treat it as a successful click.
+                    if page and page.url != url_before_click:
+                        return ClickAttemptResult(clicked=True, target_element=element_details)
+                    continue
 
         return ClickAttemptResult(clicked=False)
+
+    def _expand_click_targets(self, locator) -> list:
+        """
+        Try a few nearby clickable variants for the matched locator.
+
+        This helps swatch/radio UIs where the visible text sits inside a `<div>`
+        or hidden `<input>`, but the actual interactive surface is the wrapping
+        `<label>`.
+        """
+
+        targets = [locator]
+
+        try:
+            label_target = locator.locator("xpath=ancestor-or-self::label[1]").first
+            if label_target.count() > 0:
+                targets.append(label_target)
+        except Exception:
+            pass
+
+        deduped = []
+        seen_ids = set()
+        for target in targets:
+            target_id = id(target)
+            if target_id in seen_ids:
+                continue
+            deduped.append(target)
+            seen_ids.add(target_id)
+        return deduped
 
     def _describe_locator_element(self, locator) -> Optional[TargetElementDetails]:
         """
@@ -688,7 +740,7 @@ class BrowserExecutor:
 
     def _open_menu_hint(self, page: Page, label: str, timeout_ms: int) -> Optional[str]:
         for locator, note in self._semantic_locators_for_label(page=page, label=label):
-            click_attempt = self._try_click_locator(locator, timeout_ms=timeout_ms)
+            click_attempt = self._try_click_locator(locator, timeout_ms=timeout_ms, page=page)
             if click_attempt.clicked:
                 page.wait_for_timeout(250)
                 return f"opened menu hint {label} via {note}"
@@ -727,6 +779,11 @@ class BrowserExecutor:
         progressive scroll and then end at the bottom.
         """
 
+        # Never scroll for popup/modal/overlay assertions — scrolling can trigger
+        # Alpine.js or JS scroll-listeners that dismiss the overlay we're checking.
+        if self._looks_like_popup_check(selector=selector):
+            return
+
         if self._looks_like_footer_check(selector=selector, expected=expected):
             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             page.wait_for_timeout(300)
@@ -736,6 +793,10 @@ class BrowserExecutor:
         page.wait_for_timeout(250)
         page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         page.wait_for_timeout(300)
+
+    def _looks_like_popup_check(self, selector: str) -> bool:
+        popup_signals = ("popup", "modal", "overlay", "toast", "notification", "dialog", "alert")
+        return any(signal in selector.lower() for signal in popup_signals)
 
     def _looks_like_footer_check(self, selector: str, expected: str) -> bool:
         footer_signals = ("footer", "contentinfo", "copyright", "all rights reserved", "privacy", "terms", "©", "®")

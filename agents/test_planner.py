@@ -198,7 +198,7 @@ def plan_test_steps(
         "5) If a menu or account icon might need to open first, add `menu_hints` or an intermediate click step.\n"
         "6) Use `memory_hint_ids` only for relevant hints. Do not copy every hint into every step.\n"
         "7) For `fill`, use CSS selectors only.\n"
-        "8) `fill` must not submit the form. If submission is needed, add a separate `press` or `click` step after `fill`.\n"
+        "8) `fill` only enters text and does not submit. To submit a search or form after `fill`, add a `press` step with `key: \"Enter\"`. Do NOT add a `click` on a search/submit button after `fill`, as it may hit an autocomplete dropdown instead.\n"
         "9) Include at least one `screenshot` step near the end.\n"
         "10) `selector` must be a single selector string only, never a comma-separated list.\n"
         "11) If you want multiple selector options, put them in `candidate_selectors` as a JSON array.\n"
@@ -238,7 +238,7 @@ def plan_test_steps(
                 '{ "steps": [ ... ] }\n'
                 "Each step must only use fields supported by the Pydantic TestStep schema.\n"
                 "Use `selector` only for one selector string. If there are multiple selectors, put them in `candidate_selectors`.\n"
-                "A `fill` step only enters text and must not submit the form. Use a separate `press` or `click` step for submission.\n"
+                "A `fill` step only enters text and must not submit the form. To submit after fill, use a `press` step with `key: \"Enter\"`. Never add a `click` on a search/submit button after `fill`.\n"
                 f"{extra_repair_rule}\n"
                 "Supported actions: " + ", ".join(sorted(SUPPORTED_ACTIONS)) + ".\n"
                 "No markdown, no extra keys."

@@ -48,9 +48,10 @@ class TestStep(BaseModel):
     optional: bool = False
 
     # For `fill`
-    # `fill` only types/replaces text in the target field.
-    # It does not submit the form. Use a separate `press` or `click` step
-    # when the test needs to submit after filling.
+    # `fill` only types/replaces text in the target field, firing input/change events.
+    # It does not submit the form. To submit after filling, use a `press` step
+    # with key="Enter". Avoid clicking a submit/search button after fill, as
+    # autocomplete dropdowns can intercept the click.
     text: Optional[str] = None
 
     # For `press` (keyboard key, like "Enter", "Escape", etc.)

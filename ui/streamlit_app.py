@@ -106,7 +106,8 @@ def _render_steps(report: TestReport) -> None:
                 "Candidate Labels": " | ".join(step_exec.step.candidate_labels),
                 "Candidate Selectors": " | ".join(step_exec.step.candidate_selectors),
                 "Expected Text": step_exec.step.expected_text or "",
-                "Page URL": step_exec.page_url or "",
+                "URL Before": step_exec.page_url_before or "",
+                "URL After": step_exec.page_url or "",
                 "Target HTML": step_exec.target_element.outer_html if step_exec.target_element else "",
                 "Fallback Notes": " | ".join(step_exec.resolution_notes),
             }
@@ -121,8 +122,10 @@ def _render_steps(report: TestReport) -> None:
         with st.expander(f"Step {step_exec.step_index + 1} details"):
             st.write(f"Human action: {_human_readable_action(step_exec.step)}")
             st.write(f"Status: {step_exec.status}")
+            if step_exec.page_url_before:
+                st.write(f"URL before: {step_exec.page_url_before}")
             if step_exec.page_url:
-                st.write(f"Page URL: {step_exec.page_url}")
+                st.write(f"URL after: {step_exec.page_url}")
             if step_exec.step.selector:
                 st.write(f"Selector: `{step_exec.step.selector}`")
             if step_exec.step.candidate_labels:

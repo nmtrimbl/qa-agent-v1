@@ -84,10 +84,19 @@ class FakePage:
 
 
 class FakeLocator:
-    def __init__(self, *, visible=True, click_raises=False, children=None, element_payload=None):
+    def __init__(
+        self,
+        *,
+        visible=True,
+        click_raises=False,
+        children=None,
+        element_payload=None,
+        nested_locators=None,
+    ):
         self._visible = visible
         self._click_raises = click_raises
         self._children = children
+        self._nested_locators = nested_locators or {}
         self._element_payload = element_payload or {
             "tag_name": "a",
             "text": "Sign In",
@@ -116,6 +125,9 @@ class FakeLocator:
             raise IndexError(index)
         return self._children[index]
 
+    def locator(self, selector):
+        return self._nested_locators.get(selector, EmptyFakeLocator())
+
     def scroll_into_view_if_needed(self, timeout):
         self.scroll_calls += 1
         return False
@@ -142,6 +154,14 @@ class FakeKeyboard:
         self.press_calls.append(key)
 
 
+class EmptyFakeLocator(FakeLocator):
+    def __init__(self):
+        super().__init__(visible=False, element_payload={"tag_name": "", "text": "", "outer_html": ""})
+
+    def count(self):
+        return 0
+
+
 def test_try_click_locator_prefers_visible_match_when_first_is_hidden():
     executor = BrowserExecutor(artifacts_dir="artifacts")
     hidden = FakeLocator(visible=False, click_raises=True)
@@ -156,6 +176,35 @@ def test_try_click_locator_prefers_visible_match_when_first_is_hidden():
     assert clicked.target_element.text == "Sign In"
     assert hidden.click_calls == 0
     assert visible.click_calls == 1
+
+
+def test_try_click_locator_uses_ancestor_label_when_inner_target_is_not_clickable():
+    executor = BrowserExecutor(artifacts_dir="artifacts")
+    label_locator = FakeLocator(
+        visible=True,
+        element_payload={
+            "tag_name": "label",
+            "text": "Caddy",
+            "outer_html": "<label><div>Caddy</div></label>",
+        },
+    )
+    inner_text_locator = FakeLocator(
+        visible=True,
+        click_raises=True,
+        element_payload={
+            "tag_name": "div",
+            "text": "Caddy",
+            "outer_html": "<div>Caddy</div>",
+        },
+        nested_locators={"xpath=ancestor-or-self::label[1]": label_locator},
+    )
+
+    clicked = executor._try_click_locator(inner_text_locator, timeout_ms=500)
+
+    assert clicked.clicked is True
+    assert clicked.target_element is not None
+    assert clicked.target_element.tag_name == "label"
+    assert label_locator.click_calls == 1
 
 
 def test_capture_full_page_screenshot_scrolls_and_restores_position(tmp_path):

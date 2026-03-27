@@ -26,6 +26,7 @@ class StepExecution(BaseModel):
     step_index: int
     step: TestStep
     status: Literal["ok", "failed"]
+    page_url_before: Optional[str] = None
     page_url: Optional[str] = None
     screenshot_path: Optional[str] = None
     error_message: Optional[str] = None
