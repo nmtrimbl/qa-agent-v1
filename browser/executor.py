@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from io import BytesIO
 import re
 import traceback
@@ -7,6 +8,12 @@ import unicodedata
 from pathlib import Path
 import time
 from typing import Optional
+
+
+@contextmanager
+def _nullctx():
+    """No-op context manager used as a placeholder when page is unavailable."""
+    yield
 
 from playwright.sync_api import Page
 from PIL import Image
@@ -670,13 +677,30 @@ class BrowserExecutor:
 
                 url_before_click = page.url if page else None
                 try:
-                    click_target.click(timeout=timeout_ms)
+                    # Use expect_navigation so Playwright treats frame teardown as
+                    # expected rather than an error. The timeout here is a ceiling —
+                    # if no navigation starts within it we fall through to the
+                    # TimeoutError handler below.
+                    with page.expect_navigation(wait_until="commit", timeout=timeout_ms) if page else _nullctx():
+                        click_target.click(timeout=timeout_ms)
                     return ClickAttemptResult(clicked=True, target_element=element_details)
-                except Exception:
-                    # If the URL changed, the click triggered navigation even though
-                    # Playwright raised an error (e.g. frame detached, navigation
-                    # timeout). Treat it as a successful click.
-                    if page and page.url != url_before_click:
+                except Exception as exc:
+                    exc_str = str(exc).lower()
+                    # expect_navigation timed out — no navigation occurred, but the
+                    # click itself may have succeeded (modal open, AJAX action, etc.).
+                    if "timeout" in exc_str and page and page.url == url_before_click:
+                        return ClickAttemptResult(clicked=True, target_element=element_details)
+                    # Navigation-related errors where the frame was destroyed before
+                    # Playwright could confirm the click. Only trust the URL change
+                    # for these specific signals to avoid masking real click failures.
+                    _nav_signals = (
+                        "frame was detached",
+                        "framedetached",
+                        "execution context was destroyed",
+                        "net::err_",
+                        "target closed",
+                    )
+                    if page and page.url != url_before_click and any(s in exc_str for s in _nav_signals):
                         return ClickAttemptResult(clicked=True, target_element=element_details)
                     continue
 
