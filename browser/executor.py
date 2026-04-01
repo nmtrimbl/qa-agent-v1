@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from io import BytesIO
+import io
 import re
 import traceback
 import unicodedata
 from pathlib import Path
 import time
 from typing import Optional
+
+from PIL import Image as _PILImage
 
 
 @contextmanager
@@ -16,7 +18,6 @@ def _nullctx():
     yield
 
 from playwright.sync_api import Page
-from PIL import Image
 from pydantic import BaseModel
 
 from browser.browser_session import BrowserSession
@@ -83,15 +84,16 @@ class BrowserExecutor:
         "[data-testid='uc-accept-all-button']",
     )
     POPUP_CLOSE_SELECTORS = (
+        # Only close overlays that are clearly non-content (newsletters, cookie
+        # modals, lightboxes). Avoid broad selectors like [role='dialog'] or
+        # text=Close that also match ATC confirmation popups and other legitimate
+        # product interactions the user may want to see in a screenshot.
         ".modal-popup button[aria-label='Close']",
         ".modal-popup button[aria-label='close']",
-        "[role='dialog'] button[aria-label='Close']",
-        "[role='dialog'] button[aria-label='close']",
         ".newsletter-popup button[aria-label='Close']",
         ".newsletter-popup button[aria-label='close']",
         ".fancybox-close-small",
         "text=No Thanks",
-        "text=Close",
     )
     REMOVABLE_BLOCKER_SELECTORS = (
         ".cky-consent-container",
@@ -102,7 +104,6 @@ class BrowserExecutor:
         ".newsletter-popup",
         ".modal-popup._show",
     )
-    MAX_VIEWPORT_CAPTURE_HEIGHT = 12000
     MIN_NAVIGATION_TIMEOUT_MS = 15000
 
     def execute(
@@ -295,9 +296,16 @@ class BrowserExecutor:
         if step.action == StepAction.screenshot:
             name = step.screenshot_name or "step_screenshot"
             file_path = screenshots_dir / f"{safe_filename(name)}.png"
-            # Always store a full-page screenshot so reports include footer/content
-            # below the initial viewport.
-            self._capture_full_page_screenshot(page, file_path)
+            # Capture only the current viewport — this is what the user actually
+            # sees at this moment in the test. Avoid full_page=True because
+            # Playwright implements it by temporarily expanding the viewport height
+            # to match the full document, which repositions sticky/fixed headers,
+            # triggers accessibility overlays, and causes layout reflow. Popups and
+            # modals are viewport-relative and will be captured correctly here.
+            # Do not dismiss overlays or scroll — either would close the popup or
+            # modal that this step may be verifying.
+            self._wait_for_page_ready(page, timeout_ms=5000)
+            page.screenshot(path=str(file_path))
             result.screenshot_path = str(file_path)
             screenshot_paths.append(result.screenshot_path)
             return result
@@ -829,75 +837,206 @@ class BrowserExecutor:
 
     def _capture_full_page_screenshot(self, page: Page, file_path: Path) -> None:
         """
-        Capture a true full-page screenshot.
+        Capture a full-page screenshot showing the page as a user would see it
+        after it has fully loaded, with cookie and popup overlays removed.
 
-        Some sites do not use the normal browser scroll root, so a naive
-        `page.screenshot(full_page=True)` can miss content. We first prepare the
-        page like a real user would experience it, then capture the whole height
-        by resizing the viewport to the content size. If that is too tall for one
-        shot, we fall back to stitching viewport images together.
+        Uses scroll-stitch rather than Playwright's full_page=True. Playwright's
+        full_page=True works by temporarily expanding the viewport height to match
+        document.body.scrollHeight. This causes any CSS using min-height:100vh or
+        vh units to recompute — the page layout grows, pushing the footer and other
+        bottom sections outside the clipped screenshot bounds. Scroll-stitching
+        takes viewport-size screenshots at successive scroll positions and assembles
+        them, so no viewport resize occurs and layouts remain stable.
         """
+        self._wait_for_page_ready(page, timeout_ms=5000)
+        self._dismiss_blocking_overlays(page)
 
-        metrics_before = self._get_page_metrics(page)
-        original_y = metrics_before["current_y"]
-        original_viewport = getattr(page, "viewport_size", None) or {
-            "width": metrics_before["viewport_width"],
-            "height": metrics_before["viewport_height"],
-        }
-
+        # Disable CSS transitions and animations before scrolling. Many sites use
+        # scroll-reveal patterns where IntersectionObserver adds a class causing an
+        # opacity/transform transition. Without this, scrolling back to the top after
+        # loading content causes those elements to re-animate to their hidden state,
+        # leaving the section backgrounds (e.g. #f8fafc, #fafafa) visible but the
+        # content invisible in the screenshot.
         try:
-            self._prepare_page_for_full_page_capture(page)
-            metrics = self._get_page_metrics(page)
+            page.add_style_tag(content=(
+                "*, *::before, *::after {"
+                "  transition-duration: 0s !important;"
+                "  animation-duration: 0s !important;"
+                "  animation-delay: 0s !important;"
+                "}"
+            ))
+        except Exception:
+            pass
 
-            capture_width = max(metrics["content_width"], original_viewport["width"])
-            capture_height = max(metrics["scroll_height"], metrics["viewport_height"])
-
-            if capture_height <= self.MAX_VIEWPORT_CAPTURE_HEIGHT:
-                self._capture_with_resized_viewport(
-                    page=page,
-                    file_path=file_path,
-                    width=capture_width,
-                    height=capture_height,
-                )
-            else:
-                self._capture_with_stitching(page=page, file_path=file_path, metrics=metrics)
-        finally:
+        # Scroll through the page incrementally to trigger IntersectionObserver-based
+        # lazy loaders and Alpine.js x-intersect directives (e.g. recommendations
+        # blocks, promo sliders). Wait for network to settle at the bottom so that
+        # AJAX-driven sections finish fetching before the screenshot pass.
+        try:
+            viewport_height = (page.viewport_size or {}).get("height", 800)
+            position = 0
+            while True:
+                page_height = page.evaluate("document.body.scrollHeight")
+                if position >= page_height:
+                    break
+                position = min(position + viewport_height, page_height)
+                page.evaluate(f"window.scrollTo(0, {position})")
+                page.wait_for_timeout(200)
             try:
-                if hasattr(page, "set_viewport_size"):
-                    page.set_viewport_size(original_viewport)
+                page.wait_for_load_state("networkidle", timeout=6000)
             except Exception:
                 pass
+            new_height = page.evaluate("document.body.scrollHeight")
+            if new_height > position:
+                while True:
+                    page_height = page.evaluate("document.body.scrollHeight")
+                    if position >= page_height:
+                        break
+                    position = min(position + viewport_height, page_height)
+                    page.evaluate(f"window.scrollTo(0, {position})")
+                    page.wait_for_timeout(200)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=3000)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
-            self._scroll_page(page, y=original_y, scroll_root=metrics_before["scroll_root"])
-            page.wait_for_timeout(150)
-
-    def _prepare_page_for_full_page_capture(self, page: Page) -> None:
-        self._wait_for_page_ready(page, timeout_ms=5000)
-
-        previous_height = 0
-        for _ in range(3):
-            self._dismiss_blocking_overlays(page)
-            self._wait_for_page_ready(page, timeout_ms=2500)
-
-            metrics = self._get_page_metrics(page)
-            step_size = max(metrics["viewport_height"] - 120, 300)
-            for position in range(0, max(metrics["scroll_height"], 1), step_size):
-                self._scroll_page(page, y=position, scroll_root=metrics["scroll_root"])
-                page.wait_for_timeout(180)
-
-            self._scroll_page(page, y=metrics["scroll_height"], scroll_root=metrics["scroll_root"])
-            page.wait_for_timeout(350)
-            self._wait_for_page_ready(page, timeout_ms=2000)
-
-            refreshed_metrics = self._get_page_metrics(page)
-            if refreshed_metrics["scroll_height"] <= previous_height + 80:
-                break
-            previous_height = refreshed_metrics["scroll_height"]
-
-        final_metrics = self._get_page_metrics(page)
-        self._scroll_to_true_top(page)
         self._dismiss_blocking_overlays(page)
-        self._wait_for_page_ready(page, timeout_ms=2000)
+        self._scroll_stitch_screenshot(page, file_path)
+
+    def _scroll_stitch_screenshot(self, page: Page, file_path: Path) -> None:
+        """
+        Assemble a full-page image by stitching viewport screenshots taken at
+        successive scroll positions.
+
+        Unlike full_page=True (which resizes the viewport), each screenshot here
+        is taken at the real viewport dimensions. This keeps vh-based CSS layouts
+        stable — elements such as min-height:100vh containers don't recompute,
+        so the footer and bottom sections remain at their correct document positions.
+
+        Fixed and sticky elements (headers, success banners, etc.) are captured
+        in the first strip only. From the second strip onwards they are hidden via
+        visibility:hidden so they don't repeat throughout the stitched image.
+        The scroll step equals the full viewport height so there are no gaps or
+        overlaps in the assembled content.
+        """
+        vp = page.viewport_size or {"width": 1280, "height": 800}
+        vw = vp.get("width", 1280)
+        vh = vp.get("height", 800)
+
+        total_height = 0
+        try:
+            total_height = page.evaluate("document.body.scrollHeight")
+        except Exception:
+            pass
+
+        if total_height <= 0:
+            try:
+                page.screenshot(path=str(file_path))
+            except Exception:
+                pass
+            return
+
+        # Build scroll positions stepping one full viewport at a time. Always
+        # include a position that puts the very bottom of the page in view.
+        scroll_positions: list[int] = []
+        y = 0
+        while y < total_height:
+            scroll_positions.append(y)
+            y += vh
+        bottom_y = max(total_height - vh, 0)
+        if scroll_positions[-1] < bottom_y:
+            scroll_positions.append(bottom_y)
+
+        strips: list[_PILImage.Image] = []
+        prev_doc_end = 0
+        fixed_hidden = False
+
+        try:
+            for i, sy in enumerate(scroll_positions):
+                try:
+                    page.evaluate(f"window.scrollTo(0, {sy})")
+                    page.wait_for_timeout(150)
+                except Exception:
+                    pass
+
+                # From the second strip onwards hide all fixed/sticky elements so
+                # they don't repeat. position:fixed headers and banners are only
+                # shown in strip 0 where they appear at the top of the image.
+                # position:sticky elements behave the same when scrolled — hiding
+                # them prevents duplicates across strips.
+                if i == 1 and not fixed_hidden:
+                    try:
+                        page.evaluate("""
+                            window.__stitchFixedEls = [];
+                            for (const el of document.querySelectorAll('*')) {
+                                const s = window.getComputedStyle(el);
+                                if (s.position !== 'fixed' && s.position !== 'sticky') continue;
+                                if (s.display === 'none') continue;
+                                window.__stitchFixedEls.push({
+                                    el,
+                                    origStyle: el.getAttribute('style') || ''
+                                });
+                                el.style.setProperty('visibility', 'hidden', 'important');
+                            }
+                        """)
+                        fixed_hidden = True
+                    except Exception:
+                        pass
+
+                try:
+                    img_bytes = page.screenshot()
+                    img = _PILImage.open(io.BytesIO(img_bytes))
+                except Exception:
+                    continue
+
+                doc_start = max(sy, prev_doc_end)
+                doc_end = min(sy + vh, total_height)
+
+                if doc_start >= doc_end:
+                    continue
+
+                sr_start = max(doc_start - sy, 0)
+                sr_end = min(doc_end - sy, img.height)
+
+                if sr_start >= sr_end:
+                    continue
+
+                strip = img.crop((0, sr_start, vw, sr_end))
+                strips.append(strip)
+                prev_doc_end = doc_end
+
+        finally:
+            if fixed_hidden:
+                try:
+                    page.evaluate("""
+                        for (const {el, origStyle} of window.__stitchFixedEls || []) {
+                            if (origStyle) {
+                                el.setAttribute('style', origStyle);
+                            } else {
+                                el.removeAttribute('style');
+                            }
+                        }
+                        delete window.__stitchFixedEls;
+                    """)
+                except Exception:
+                    pass
+
+        if not strips:
+            try:
+                page.screenshot(path=str(file_path))
+            except Exception:
+                pass
+            return
+
+        total_h = sum(s.height for s in strips)
+        final_img = _PILImage.new("RGB", (vw, total_h), (255, 255, 255))
+        offset = 0
+        for strip in strips:
+            final_img.paste(strip, (0, offset))
+            offset += strip.height
+        final_img.save(str(file_path))
 
     def _dismiss_blocking_overlays(self, page: Page) -> None:
         """
@@ -970,129 +1109,6 @@ class BrowserExecutor:
             if any(word in combined for word in self.COOKIE_SIGNAL_WORDS):
                 return False
         return True
-
-    def _capture_with_resized_viewport(self, page: Page, file_path: Path, width: int, height: int) -> None:
-        if hasattr(page, "set_viewport_size"):
-            page.set_viewport_size({"width": int(width), "height": int(height)})
-            page.wait_for_timeout(500)
-            self._wait_for_page_ready(page, timeout_ms=1500)
-        self._scroll_to_true_top(page)
-        page.wait_for_timeout(150)
-        page.screenshot(path=str(file_path), full_page=False)
-
-    def _capture_with_stitching(self, page: Page, file_path: Path, metrics: dict[str, int | str]) -> None:
-        """
-        Fallback for very tall pages when one giant viewport would be too large.
-        """
-
-        viewport_height = int(metrics["viewport_height"])
-        capture_width = int(metrics["content_width"])
-        scroll_height = int(metrics["scroll_height"])
-        scroll_root = str(metrics["scroll_root"])
-
-        if hasattr(page, "set_viewport_size"):
-            page.set_viewport_size({"width": int(capture_width), "height": int(viewport_height)})
-            page.wait_for_timeout(300)
-
-        stitched = Image.new("RGB", (capture_width, scroll_height), "white")
-        y = 0
-        while y < scroll_height:
-            self._scroll_page(page, y=y, scroll_root=scroll_root)
-            page.wait_for_timeout(200)
-            screenshot_bytes = page.screenshot(full_page=False)
-            slice_image = Image.open(BytesIO(screenshot_bytes)).convert("RGB")
-
-            remaining_height = scroll_height - y
-            crop_height = min(slice_image.height, remaining_height)
-            if crop_height != slice_image.height:
-                slice_image = slice_image.crop((0, 0, slice_image.width, crop_height))
-
-            stitched.paste(slice_image, (0, y))
-            y += crop_height
-
-        stitched.save(file_path)
-
-    def _scroll_page(self, page: Page, y: int, scroll_root: str) -> None:
-        try:
-            page.evaluate(
-                """({ y, scrollRoot }) => {
-                    const nextY = Math.max(0, Math.floor(y || 0));
-                    if (scrollRoot === "body" && document.body) {
-                        document.body.scrollTop = nextY;
-                    } else {
-                        document.documentElement.scrollTop = nextY;
-                        window.scrollTo(0, nextY);
-                    }
-                }""",
-                {"y": y, "scrollRoot": scroll_root},
-            )
-        except Exception:
-            pass
-
-    def _scroll_to_true_top(self, page: Page) -> None:
-        try:
-            page.evaluate(
-                """() => {
-                    if (document.body) {
-                        document.body.scrollTop = 0;
-                    }
-                    if (document.documentElement) {
-                        document.documentElement.scrollTop = 0;
-                    }
-                    window.scrollTo(0, 0);
-                }"""
-            )
-        except Exception:
-            pass
-
-    def _get_page_metrics(self, page: Page) -> dict[str, int | str]:
-        try:
-            return page.evaluate(
-                """() => {
-                    const body = document.body;
-                    const doc = document.documentElement;
-                    const bodyScrollHeight = body ? body.scrollHeight : 0;
-                    const docScrollHeight = doc ? doc.scrollHeight : 0;
-                    const scrollRoot =
-                        bodyScrollHeight > docScrollHeight + 100 ? "body" : "documentElement";
-                    const currentY =
-                        scrollRoot === "body"
-                            ? Math.floor(body ? body.scrollTop : 0)
-                            : Math.floor((window.scrollY || (doc ? doc.scrollTop : 0)) || 0);
-                    const scrollHeight = Math.max(
-                        bodyScrollHeight,
-                        docScrollHeight,
-                        body ? body.offsetHeight : 0,
-                        doc ? doc.offsetHeight : 0,
-                    );
-                    const contentWidth = Math.max(
-                        body ? body.scrollWidth : 0,
-                        doc ? doc.scrollWidth : 0,
-                        body ? body.clientWidth : 0,
-                        doc ? doc.clientWidth : 0,
-                        Math.floor(window.innerWidth || 0),
-                    );
-
-                    return {
-                        scroll_root: scrollRoot,
-                        current_y: currentY,
-                        viewport_width: Math.floor(window.innerWidth || 1280),
-                        viewport_height: Math.floor(window.innerHeight || 800),
-                        scroll_height: Math.floor(scrollHeight || 0),
-                        content_width: Math.floor(contentWidth || 1280),
-                    };
-                }"""
-            )
-        except Exception:
-            # Safe fallback if page metrics are unavailable for some reason.
-            return {
-                "scroll_root": "documentElement",
-                "current_y": 0,
-                "viewport_width": 1280,
-                "viewport_height": 800,
-                "scroll_height": 2000,
-                "content_width": 1280,
-            }
 
     def _safe_inner_text(self, locator, timeout_ms: int) -> Optional[str]:
         try:
