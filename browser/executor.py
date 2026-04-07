@@ -938,20 +938,26 @@ class BrowserExecutor:
                 pass
             return
 
-        # Build scroll positions stepping one full viewport at a time. Always
-        # include a position that puts the very bottom of the page in view.
+        # Maximum scrollTop the browser will honour (can't scroll past this).
+        max_scroll = max(total_height - vh, 0)
+
+        # Build scroll positions that stay within [0, max_scroll].
+        # The naive approach of stepping by vh can produce positions that exceed
+        # max_scroll — the browser silently clamps scrollTo() to max_scroll,
+        # so the requested sy and the real scroll diverge, which causes the crop
+        # math to pick the wrong rows and duplicate content at the bottom.
         scroll_positions: list[int] = []
         y = 0
-        while y < total_height:
+        while True:
             scroll_positions.append(y)
-            y += vh
-        bottom_y = max(total_height - vh, 0)
-        if scroll_positions[-1] < bottom_y:
-            scroll_positions.append(bottom_y)
+            if y >= max_scroll:
+                break
+            y = min(y + vh, max_scroll)
 
         strips: list[_PILImage.Image] = []
         prev_doc_end = 0
         fixed_hidden = False
+        dpr = 1.0  # physical pixels per CSS pixel; measured from first screenshot
 
         try:
             for i, sy in enumerate(scroll_positions):
@@ -960,6 +966,14 @@ class BrowserExecutor:
                     page.wait_for_timeout(150)
                 except Exception:
                     pass
+
+                # Read back the actual scroll position. With our capped list this
+                # should always equal sy, but reading it defensively means the crop
+                # math is correct even if the browser adjusts the position.
+                try:
+                    actual_sy = int(page.evaluate("window.pageYOffset"))
+                except Exception:
+                    actual_sy = sy
 
                 # From the second strip onwards hide all fixed/sticky elements so
                 # they don't repeat. position:fixed headers and banners are only
@@ -991,19 +1005,26 @@ class BrowserExecutor:
                 except Exception:
                     continue
 
-                doc_start = max(sy, prev_doc_end)
-                doc_end = min(sy + vh, total_height)
+                # Measure device pixel ratio from the first screenshot so all
+                # crop coordinates are in physical pixels, not CSS pixels.
+                if i == 0:
+                    dpr = (img.height / vh) if vh > 0 else 1.0
+
+                doc_start = max(actual_sy, prev_doc_end)
+                doc_end = min(actual_sy + vh, total_height)
 
                 if doc_start >= doc_end:
                     continue
 
-                sr_start = max(doc_start - sy, 0)
-                sr_end = min(doc_end - sy, img.height)
+                # Convert CSS-pixel document offsets to physical pixel rows inside
+                # this screenshot.
+                px_start = max(0, round((doc_start - actual_sy) * dpr))
+                px_end = min(img.height, round((doc_end - actual_sy) * dpr))
 
-                if sr_start >= sr_end:
+                if px_start >= px_end:
                     continue
 
-                strip = img.crop((0, sr_start, vw, sr_end))
+                strip = img.crop((0, px_start, img.width, px_end))
                 strips.append(strip)
                 prev_doc_end = doc_end
 
@@ -1031,7 +1052,8 @@ class BrowserExecutor:
             return
 
         total_h = sum(s.height for s in strips)
-        final_img = _PILImage.new("RGB", (vw, total_h), (255, 255, 255))
+        out_w = strips[0].width  # physical pixels (accounts for DPR)
+        final_img = _PILImage.new("RGB", (out_w, total_h), (255, 255, 255))
         offset = 0
         for strip in strips:
             final_img.paste(strip, (0, offset))
